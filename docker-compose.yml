@@ -1,0 +1,38 @@
+# Local stack: build the warehouse once, then serve the console.
+#
+#   docker compose run --rm seed     # generate history, inject faults, self-heal
+#   docker compose up sentinel       # console on http://localhost:8000
+#
+# The two services share one named volume, which is exactly how the real
+# deployment separates the batch workload from the read-only API.
+
+services:
+  seed:
+    build: .
+    image: sentinel:local
+    command: ["demo", "--rules-only"]
+    environment:
+      SENTINEL_DATA_DIR: /data
+      SENTINEL_LOG_FORMAT: console
+      # Drop --rules-only from the command and set this to run the LLM agent:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - warehouse:/data
+    profiles: ["seed"]
+
+  sentinel:
+    build: .
+    image: sentinel:local
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SENTINEL_DATA_DIR: /data
+      SENTINEL_LOG_FORMAT: json
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - warehouse:/data
+    restart: unless-stopped
+
+volumes:
+  warehouse:

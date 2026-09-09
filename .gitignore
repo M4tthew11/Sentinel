@@ -1,0 +1,35 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local runtime artifacts
+data/
+.tmp/
+.pipcache/
+*.duckdb
+*.duckdb.wal
+.env
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

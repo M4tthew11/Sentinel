@@ -1,0 +1,19 @@
+project     = "sentinel"
+environment = "dev"
+location    = "westeurope"
+
+# Push the image first:
+#   docker build -t <registry>.azurecr.io/sentinel:0.1.0 .
+#   docker push <registry>.azurecr.io/sentinel:0.1.0
+image = "myregistry.azurecr.io/sentinel:0.1.0"
+
+# Start in manual mode: nothing self-applies until you have watched it work.
+remediation_mode = "manual"
+
+# Create the secret first, then reference it here:
+#   az keyvault secret set --vault-name <vault> --name anthropic-api-key --value sk-ant-...
+anthropic_secret_name = ""
+
+tags = {
+  owner = "data-platform"
+}
