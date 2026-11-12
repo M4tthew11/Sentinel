@@ -16,9 +16,11 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 from sentinel.api.auth import authenticated_approver
+from sentinel.api.preview import preview
 from sentinel.config import Settings, get_settings
 from sentinel.elt import ops
 from sentinel.elt.warehouse import Warehouse
+from sentinel.evals.reports import EVAL_REPORT_DIR, load_reports
 from sentinel.incidents.models import Incident, IncidentStatus
 from sentinel.incidents.store import IncidentStore
 from sentinel.logging import get_logger
@@ -220,19 +222,27 @@ def metrics(
     dataset: str = Query(description="Dataset name."),
     metric: str = Query(default="row_count", description="Metric name."),
     days: int = Query(default=30, ge=1, le=365),
+    until: date | None = Query(
+        default=None, description="Last business date to include; defaults to the latest."
+    ),
 ) -> dict[str, Any]:
-    """Return a metric time series for charting."""
+    """Return a metric time series for charting, oldest first.
+
+    A rebuilt date (a remediation reruns the pipeline) holds the latest
+    measurement; what detection originally saw is on the incident's anomaly
+    signals.
+    """
     warehouse = _warehouse()
     try:
         rows = warehouse.fetch_records(
             """
             SELECT business_date, value
             FROM dq_metric
-            WHERE dataset = ? AND metric = ?
+            WHERE dataset = ? AND metric = ? AND (? IS NULL OR business_date <= ?)
             ORDER BY business_date DESC
             LIMIT ?
             """,
-            [dataset, metric, days],
+            [dataset, metric, until, until, days],
         )
     finally:
         warehouse.close()
@@ -241,6 +251,27 @@ def metrics(
     ]
     points.reverse()
     return {"dataset": dataset, "metric": metric, "points": points}
+
+
+@app.get("/api/incidents/{incident_id}/actions/{action_index}/preview", tags=["remediation"])
+def preview_action(incident_id: str, action_index: int) -> dict[str, Any]:
+    """Describe what an action would change, before anyone approves it."""
+    warehouse = _warehouse()
+    try:
+        incident = IncidentStore(warehouse).get(incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail=f"No incident {incident_id}")
+        if not 0 <= action_index < len(incident.actions):
+            raise HTTPException(status_code=404, detail=f"No action {action_index}")
+        return preview(warehouse, incident, incident.actions[action_index])
+    finally:
+        warehouse.close()
+
+
+@app.get("/api/evals", tags=["evals"])
+def eval_reports() -> list[dict[str, Any]]:
+    """The latest saved report per scenario and engine, written by ``sentinel eval``."""
+    return load_reports(get_settings().data_dir / EVAL_REPORT_DIR)
 
 
 @app.get("/api/actions", tags=["remediation"])

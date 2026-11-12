@@ -197,6 +197,22 @@ sentinel show INC-xxxx    # one incident, with the agent's reasoning and timelin
 sentinel eval --rules-only  # score the diagnosis engine against the golden set
 ```
 
+### The console
+
+`sentinel serve` is a single page with three views:
+
+- **Incidents** - counters and the incident list.
+- **One incident** - the diagnosis with its reasoning, failed checks and anomaly
+  signals, a chart of the metric against its own history (the value as detected
+  and after remediation), every action with a *What changes?* preview, and the
+  timeline. For `apply_unit_correction` the preview gives the corrected total
+  against a normal day and checks the factor store by store against the week
+  before. A correction derived from the day's total always makes the total look
+  right, so only the per-store check catches a unit change that hit some stores
+  and not others.
+- **Evals** - the last `sentinel eval` result per scenario and engine, side by
+  side, with each day's verdict (right fix, incomplete, harmful).
+
 ### Running it with the LLM agent
 
 ```bash
@@ -404,8 +420,9 @@ Worth being explicit about, since the demo makes it all look tidy:
 - **Freshness is not modelled.** The generator drops files immediately, so late
   arrival is modelled as absence rather than as lateness. A real deployment would
   measure the lag between the business date and the load.
-- **The console is deliberately minimal.** One HTML file, no build step. Enough to
-  approve an action and read a diagnosis; not a product.
+- **The console is one HTML file with no build step.** It covers incidents, a
+  metric chart, action previews and saved eval results. It has no user accounts
+  beyond approver tokens and no live updates beyond a 15-second refresh.
 
 ---
 

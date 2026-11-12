@@ -71,6 +71,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
+# One embedded HTML/CSS/JS page; Python line length does not apply to it.
+"src/sentinel/api/dashboard.py" = ["E501"]
 
 [tool.mypy]
 # Type-checked against 3.12 (the numpy stubs use 3.12-only syntax); runtime

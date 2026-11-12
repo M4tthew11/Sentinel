@@ -258,6 +258,20 @@ def _isolation_forest_verdict(
     return prediction == -1, round(score, 4)
 
 
+def baseline_for(
+    warehouse: Warehouse, dataset: str, business_date: date, metric: str
+) -> float | None:
+    """The value the detector expects for one metric on one date, if it has history."""
+    history = m.metric_history(warehouse, dataset, business_date)
+    if history.empty or metric not in history.columns:
+        return None
+    series = history[metric].dropna()
+    if series.empty:
+        return None
+    expected, _ = _baseline(series, business_date)
+    return expected
+
+
 def detect_for_run(
     warehouse: Warehouse,
     business_date: date,
