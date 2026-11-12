@@ -440,14 +440,27 @@ def eval_command(
             help="Exit non-zero when root-cause accuracy falls below this. Used as a CI gate."
         ),
     ] = 0.0,
+    scenario: Annotated[
+        str,
+        typer.Option(
+            help="Which scenario to replay: 'standard' (one catalogued fault per day) or "
+            "'hard' (compound and off-catalogue faults)."
+        ),
+    ] = "standard",
 ) -> None:
     """Score the diagnosis engine against the golden incident set."""
     from sentinel.evals.harness import render_report, run_evals
+    from sentinel.scenario import SCENARIOS
 
+    if scenario not in SCENARIOS:
+        raise typer.BadParameter(
+            f"unknown scenario {scenario!r}; choose from {', '.join(SCENARIOS)}",
+            param_hint="--scenario",
+        )
     settings = get_settings()
     if rules_only:
         settings.agent.provider = AgentProvider.RULES
-    report = run_evals(settings, fresh=not keep)
+    report = run_evals(settings, scenario=SCENARIOS[scenario](), fresh=not keep)
     render_report(report, console)
 
     if report.root_cause_accuracy < min_accuracy:

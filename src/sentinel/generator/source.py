@@ -12,6 +12,7 @@ reproduces exactly the same history - including the injected faults.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -110,6 +111,7 @@ class GeneratedExtract:
     path: Path | None
     row_count: int
     fault_type: FaultType
+    """The first fault injected, or ``NONE``."""
 
     @property
     def arrived(self) -> bool:
@@ -231,14 +233,16 @@ def extract_path(landing_dir: Path, dataset: str, business_date: date) -> Path:
 
 def generate_day(
     business_date: date,
-    faults: dict[str, FaultSpec] | None = None,
+    faults: Mapping[str, FaultSpec | Sequence[FaultSpec]] | None = None,
     settings: Settings | None = None,
 ) -> dict[str, GeneratedExtract]:
     """Generate every dataset for one business date and write it to the landing zone.
 
     Args:
         business_date: The date to generate.
-        faults: Optional mapping of dataset name to the fault to inject.
+        faults: Optional mapping of dataset name to the fault to inject, or to
+            several faults applied in order (two things going wrong on the same
+            partition on the same day).
         settings: Settings override, mostly for tests.
 
     Returns:
@@ -251,14 +255,17 @@ def generate_day(
     results: dict[str, GeneratedExtract] = {}
     for dataset, builder in _GENERATORS.items():
         frame = builder(business_date)
-        spec = faults.get(dataset)
-        fault_type = spec.fault_type if spec else FaultType.NONE
+        specs = fault_specs(faults.get(dataset))
+        fault_type = specs[0].fault_type if specs else FaultType.NONE
 
-        if spec is not None:
-            rng = np.random.default_rng(_seed(business_date, dataset) + 17)
-            maybe_frame = apply_fault(frame, spec, rng)
-        else:
-            maybe_frame = frame
+        maybe_frame: pd.DataFrame | None = frame
+        for position, spec in enumerate(specs):
+            if maybe_frame is None:
+                break
+            # The first fault keeps the seed it always had, so single-fault
+            # scenarios corrupt exactly the same rows as before.
+            rng = np.random.default_rng(_seed(business_date, dataset) + 17 + 101 * position)
+            maybe_frame = apply_fault(maybe_frame, spec, rng)
 
         path = extract_path(settings.landing_dir, dataset, business_date)
         if maybe_frame is None:
@@ -285,10 +292,19 @@ def generate_day(
     return results
 
 
+def fault_specs(value: FaultSpec | Sequence[FaultSpec] | None) -> tuple[FaultSpec, ...]:
+    """Normalise one fault, several faults or none into a tuple."""
+    if value is None:
+        return ()
+    if isinstance(value, FaultSpec):
+        return (value,)
+    return tuple(value)
+
+
 def generate_range(
     start: date,
     end: date,
-    faults_by_date: dict[date, dict[str, FaultSpec]] | None = None,
+    faults_by_date: Mapping[date, Mapping[str, FaultSpec | Sequence[FaultSpec]]] | None = None,
     settings: Settings | None = None,
 ) -> dict[date, dict[str, GeneratedExtract]]:
     """Generate an inclusive range of business dates."""

@@ -90,9 +90,11 @@ Sentinel automates that middle part, and stops where automation should stop:
 - **Remediation is bounded.** The agent proposes action names from a registry;
   an executor validates them, refuses anything else, and blocks high-risk actions
   until a human approves. See [ADR 4](docs/adr/0004-remediation-whitelist.md).
-- **Nothing is closed until it is verified.** The executor re-runs the pipeline and
-  re-checks the data. `resolved` means the checks pass. `remediated` means the
-  damage was contained but the feed is still broken - a distinction worth keeping.
+- **Nothing is closed until it is verified.** The executor re-runs the pipeline,
+  re-checks the contracts and re-scores the metrics against their baseline.
+  `resolved` means the checks pass and the values look normal again. `remediated`
+  means the damage was contained but the feed is still broken - a distinction
+  worth keeping.
 
 ---
 
@@ -272,9 +274,40 @@ detection 100% | root cause 100% | actions 100% | 160.7s total     # engine: rul
 On this scenario the decision tree scores 100%, because every fault is one
 somebody already enumerated. That is the honest baseline, and it is why the rule
 engine is the CI gate (`sentinel eval --rules-only --min-accuracy 1.0`) rather
-than a placeholder. The LLM's advantage is the eighth failure mode - the one
-nobody wrote a rule for - which is exactly the case a fixed scenario cannot
-measure.
+than a placeholder.
+
+#### The hard scenario
+
+`sentinel eval --scenario hard` replays what the standard scenario cannot measure:
+
+| Day | What went wrong upstream | What a good engine does |
+|---|---|---|
+| 1 | File delivered twice *and* in cases instead of eaches | dedupe **and** correct the unit |
+| 2 | Extract truncated *and* new SKUs ahead of the master | quarantine **and** hold the date |
+| 3 | Only some stores switched to cases (off-catalogue) | hold and ticket; **no** blanket unit correction |
+| 4 | Returns netted into sales as negatives (off-catalogue) | call it unknown, hold and ticket |
+| 5 | *(nothing)* | stay quiet |
+
+Two extra numbers matter here. *Causes found* is the share of injected causes the
+engine named, since a diagnosis can now carry `contributing_causes` next to its
+root cause. *Harmful* is the share of days where it proposed an action that would
+make things worse, such as rescaling a whole partition when only a third of it
+changed unit.
+
+```
+detection 100% | root cause 100% | causes found 75% | actions 0% | harmful 25%   # engine: rules
+```
+
+The decision tree names a plausible headline every time and still gets every day
+wrong: it stops at the first matching rule, so it fixes half of each compound
+fault, and it confidently proposes a full-partition unit correction for a partial
+one. That is the gap an LLM engine has to close to be worth its latency, and
+`sentinel eval --scenario hard` with `ANTHROPIC_API_KEY` set measures it.
+
+The scenario also caught a verification gap. On day 1, deduplicating made every
+contract pass, so the incident used to close as `resolved` while units were still
+twelve times too high. Verification now also re-runs the anomaly detector on the
+value metrics, and that day correctly ends as `remediated`.
 
 ---
 
@@ -314,7 +347,7 @@ make test       # pytest with coverage
 make demo       # the full scenario
 ```
 
-95 tests, about four minutes, entirely offline. They exercise the real warehouse
+118 tests, about four minutes, entirely offline. They exercise the real warehouse
 rather than mocks, so a broken SQL string fails a test; the Claude engine is
 tested against a stubbed client, including its failure and fallback paths.
 
@@ -328,9 +361,25 @@ platform stops identifying every injected fault, and a container build.
 
 `docker compose` is the local path. [`infra/terraform`](infra/terraform) is the
 same thing on Azure: Container Apps for the console, a scheduled Container Apps
-Job for the nightly pipeline, ADLS Gen2 for the layers, Key Vault for the API key,
-and a managed identity so nothing carries a connection string. Storage account
-keys are disabled outright.
+Job for the nightly pipeline, an Azure Files share that both mount for the
+warehouse file, ADLS Gen2 for the layers, Key Vault for the secrets, and a managed
+identity so the application carries no connection string.
+
+### Who may approve
+
+Approving or rejecting an action changes production data, so the console has to
+know who is asking. Set `SENTINEL_APPROVER_TOKENS` to `name:token` pairs and every
+write needs `Authorization: Bearer <token>`; the approver recorded on the incident
+is the name that token belongs to, never a name the client sent. With no tokens
+configured, writes are accepted only from the loopback interface, so
+`sentinel serve` on a laptop needs no setup and a deployment that forgot to
+configure tokens fails closed. Reads stay open either way.
+
+```bash
+export SENTINEL_APPROVER_TOKENS="alice:$(openssl rand -hex 24)"
+curl -X POST -H "Authorization: Bearer <alice's token>" \
+     http://localhost:8000/api/incidents/INC-xxxx/actions/1/approve
+```
 
 `remediation_mode` defaults to `manual` there. Autonomy is opt-in per environment:
 nothing self-applies in a new deployment until someone has watched it propose the
@@ -345,9 +394,9 @@ Worth being explicit about, since the demo makes it all look tidy:
 - **Scale.** DuckDB in one process. Silver rebuilds fully on every run, which is
   cheap at 100k rows and wrong at 100 million. Silver and gold would move to
   Databricks or Synapse; the operational tables would not.
-- **One fault per day.** The scenario injects one failure at a time. Two
-  interacting faults on the same partition would be a harder and more realistic
-  test, and is the next thing I would add.
+- **Synthetic faults, small scenarios.** The hard scenario adds compound and
+  off-catalogue faults, but it is five days long and hand-written. It shows
+  where the decision tree breaks; it is not a benchmark.
 - **The detector is unsupervised by necessity.** With no labelled incident history
   there is nothing to train on, so it is a robust z-score against a weekday
   baseline plus an IsolationForest. Once incidents accumulate, the labels the

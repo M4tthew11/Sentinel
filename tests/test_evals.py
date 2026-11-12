@@ -11,8 +11,16 @@ from __future__ import annotations
 from datetime import date
 
 from sentinel.evals.harness import EvalCase, EvalReport, _score
+from sentinel.generator.faults import OFF_CATALOGUE
+from sentinel.generator.source import fault_specs
 from sentinel.incidents.models import Diagnosis, Incident, ProposedAction, RootCause
-from sentinel.scenario import DEFAULT_SCENARIO, ScenarioDay, build_scenario
+from sentinel.scenario import (
+    DEFAULT_SCENARIO,
+    SCENARIOS,
+    ScenarioDay,
+    build_hard_scenario,
+    build_scenario,
+)
 
 
 def _case(**overrides) -> EvalCase:
@@ -122,3 +130,110 @@ def test_scenario_ends_with_a_control_day() -> None:
     assert not control.is_incident
     assert control.faults, "the injected rename must still be in force"
     assert len(scenario.history_dates) >= 40
+
+
+# -- compound and off-catalogue scoring -------------------------------------
+
+
+def _compound(**overrides) -> EvalCase:
+    payload = {
+        "expected_root_cause": "duplicate_batch",
+        "expected_contributing": ("unit_of_measure",),
+        "observed_root_cause": "duplicate_batch",
+        "expected_actions": ("enable_dedupe", "apply_unit_correction"),
+        "proposed_actions": ("enable_dedupe", "rerun_pipeline"),
+    }
+    payload.update(overrides)
+    return _case(**payload)
+
+
+def test_either_injected_cause_is_an_acceptable_headline() -> None:
+    assert _compound().root_cause_correct
+    assert _compound(observed_root_cause="unit_of_measure").root_cause_correct
+    assert not _compound(observed_root_cause="null_spike").root_cause_correct
+
+
+def test_naming_only_one_of_two_causes_is_half_coverage() -> None:
+    assert _compound().cause_coverage == 0.5
+    full = _compound(observed_contributing=("unit_of_measure",))
+    assert full.cause_coverage == 1.0
+
+
+def test_fixing_half_a_compound_fault_fails_the_action_score() -> None:
+    assert not _compound().actions_correct
+    fixed = _compound(proposed_actions=("enable_dedupe", "apply_unit_correction"))
+    assert fixed.actions_correct
+
+
+def test_a_forbidden_action_is_harmful_even_alongside_the_right_ones() -> None:
+    case = _case(
+        expected_root_cause="unit_of_measure",
+        observed_root_cause="unit_of_measure",
+        expected_actions=("hold_downstream", "open_upstream_ticket"),
+        proposed_actions=("hold_downstream", "apply_unit_correction", "open_upstream_ticket"),
+        forbidden_actions=("apply_unit_correction",),
+    )
+    assert case.root_cause_correct
+    assert case.harmful
+    assert not case.actions_correct
+
+
+def test_report_aggregates_coverage_and_harm() -> None:
+    report = EvalReport(
+        engine="rules",
+        cases=[
+            _compound(),
+            _compound(
+                observed_contributing=("unit_of_measure",),
+                proposed_actions=("apply_unit_correction",),
+                forbidden_actions=("apply_unit_correction",),
+            ),
+        ],
+    )
+    assert report.cause_coverage == 0.75
+    assert report.harmful_rate == 0.5
+
+
+def test_scoring_carries_contributing_causes_and_status() -> None:
+    day = ScenarioDay(
+        business_date=date(2025, 3, 1),
+        dataset="pos_sales",
+        expected_root_cause=RootCause.DUPLICATE_BATCH,
+        contributing_causes=(RootCause.UNIT_OF_MEASURE,),
+        expected_actions=("enable_dedupe",),
+        forbidden_actions=("quarantine_partition",),
+    )
+    incident = Incident(
+        run_id="RUN-1",
+        business_date=day.business_date,
+        dataset="pos_sales",
+        title="dupes",
+        diagnosis=Diagnosis(
+            root_cause=RootCause.UNIT_OF_MEASURE,
+            contributing_causes=[RootCause.DUPLICATE_BATCH],
+            proposed_actions=[ProposedAction(name="enable_dedupe")],
+        ),
+    )
+    case = _score(day, [incident])
+    assert case.expected_causes == ("duplicate_batch", "unit_of_measure")
+    assert case.cause_coverage == 1.0
+    assert case.forbidden_actions == ("quarantine_partition",)
+    assert case.final_status == str(incident.status)
+
+
+def test_hard_scenario_mixes_compound_and_off_catalogue_days() -> None:
+    scenario = build_hard_scenario()
+    assert scenario.name == "hard"
+    injected = [
+        spec
+        for day in scenario.days
+        for value in day.faults.values()
+        for spec in fault_specs(value)
+    ]
+    assert any(
+        len(fault_specs(value)) > 1 for day in scenario.days for value in day.faults.values()
+    )
+    assert {spec.fault_type for spec in injected} & OFF_CATALOGUE == OFF_CATALOGUE
+    assert any(day.forbidden_actions for day in scenario.days)
+    assert not scenario.days[-1].is_incident, "a clean control day keeps false positives honest"
+    assert set(SCENARIOS) == {"standard", "hard"}

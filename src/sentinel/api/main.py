@@ -12,9 +12,10 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
+from sentinel.api.auth import authenticated_approver
 from sentinel.config import Settings, get_settings
 from sentinel.elt import ops
 from sentinel.elt.warehouse import Warehouse
@@ -143,13 +144,25 @@ def get_incident(incident_id: str) -> dict[str, Any]:
     return incident.model_dump(mode="json")
 
 
+def _approver_name(authenticated: str | None, claimed: str | None) -> str:
+    """The name recorded on the incident for an approval or rejection.
+
+    A token-authenticated caller is recorded under the name their token belongs
+    to; whatever name the request body carries is ignored. Only an unauthenticated
+    local caller (loopback, no tokens configured) may name themselves.
+    """
+    return authenticated or claimed or "local-operator"
+
+
 @app.post("/api/incidents/{incident_id}/actions/{action_index}/approve", tags=["remediation"])
 def approve_action(
     incident_id: str,
     action_index: int,
-    approver: str = Body(default="api-user", embed=True),
+    approver: str | None = Body(default=None, embed=True),
+    authenticated: str | None = Depends(authenticated_approver),
 ) -> dict[str, Any]:
     """Approve a pending high-risk action and execute it."""
+    approver = _approver_name(authenticated, approver)
     warehouse = _warehouse(read_only=False)
     try:
         store = IncidentStore(warehouse)
@@ -174,10 +187,12 @@ def approve_action(
 def reject_action(
     incident_id: str,
     action_index: int,
-    approver: str = Body(default="api-user", embed=True),
+    approver: str | None = Body(default=None, embed=True),
     reason: str = Body(default="rejected by operator", embed=True),
+    authenticated: str | None = Depends(authenticated_approver),
 ) -> dict[str, Any]:
     """Reject a pending action."""
+    approver = _approver_name(authenticated, approver)
     warehouse = _warehouse(read_only=False)
     try:
         store = IncidentStore(warehouse)

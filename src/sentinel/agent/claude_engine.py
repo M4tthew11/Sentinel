@@ -131,6 +131,15 @@ class ClaudeEngine:
         except ValueError:
             root_cause = RootCause.UNKNOWN
 
+        contributing: list[RootCause] = []
+        for raw in payload.get("contributing_causes") or []:
+            try:
+                cause = RootCause(str(raw))
+            except ValueError:
+                continue
+            if cause not in (root_cause, RootCause.UNKNOWN) and cause not in contributing:
+                contributing.append(cause)
+
         actions: list[ProposedAction] = []
         for item in payload.get("proposed_actions") or []:
             if not isinstance(item, dict) or not item.get("name"):
@@ -147,6 +156,7 @@ class ClaudeEngine:
         confidence = payload.get("confidence")
         return Diagnosis(
             root_cause=root_cause,
+            contributing_causes=contributing,
             confidence=min(max(float(confidence), 0.0), 1.0) if confidence is not None else 0.0,
             summary=str(payload.get("summary") or ""),
             reasoning=str(payload.get("reasoning") or ""),
