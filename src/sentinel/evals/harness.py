@@ -279,3 +279,107 @@ def render_report(report: EvalReport, console: Console | None = None) -> None:
         f"{report.mean_latency_ms:.0f} ms/diagnosis | "
         f"{report.wall_seconds:.1f}s total"
     )
+
+
+#: The headline metrics, as (label, attribute) pairs, in display order.
+HEADLINE_METRICS: tuple[tuple[str, str], ...] = (
+    ("detection", "detection_rate"),
+    ("root cause", "root_cause_accuracy"),
+    ("causes found", "cause_coverage"),
+    ("actions", "action_accuracy"),
+    ("harmful", "harmful_rate"),
+)
+
+
+@dataclass
+class RepeatedEvalReport:
+    """Several replays of the same scenario with the same engine.
+
+    The rule engine is deterministic, so one run says everything. An LLM is not:
+    the same incident can be diagnosed differently on a second attempt, and a
+    single good run is an anecdote. Means, the min-max spread and per-day tallies
+    say how much of the result is the engine and how much is the dice.
+    """
+
+    runs: list[EvalReport]
+
+    @property
+    def engine(self) -> str:
+        """The engine every run used."""
+        return self.runs[0].engine
+
+    @property
+    def scenario(self) -> str:
+        """The scenario every run replayed."""
+        return self.runs[0].scenario
+
+    def values(self, attribute: str) -> list[float]:
+        """One headline metric across the runs."""
+        return [float(getattr(run, attribute)) for run in self.runs]
+
+    def mean(self, attribute: str) -> float:
+        """Mean of a headline metric across the runs."""
+        values = self.values(attribute)
+        return sum(values) / len(values)
+
+    def spread(self, attribute: str) -> tuple[float, float]:
+        """Lowest and highest value of a headline metric across the runs."""
+        values = self.values(attribute)
+        return min(values), max(values)
+
+    def day_tally(self, index: int, predicate: str) -> int:
+        """In how many runs a boolean property of day ``index`` held."""
+        return sum(bool(getattr(run.cases[index], predicate)) for run in self.runs)
+
+    @property
+    def wall_seconds(self) -> float:
+        """Total time over all runs."""
+        return sum(run.wall_seconds for run in self.runs)
+
+
+def run_repeated_evals(
+    settings: Settings | None = None,
+    scenario: Scenario | None = None,
+    repeat: int = 1,
+) -> RepeatedEvalReport:
+    """Replay a scenario ``repeat`` times from a fresh warehouse each time."""
+    if repeat < 1:
+        raise ValueError("repeat must be at least 1")
+    runs = []
+    for attempt in range(repeat):
+        log.info("evals.attempt", attempt=attempt + 1, of=repeat)
+        runs.append(run_evals(settings, scenario=scenario, fresh=True))
+    return RepeatedEvalReport(runs=runs)
+
+
+def render_repeated(report: RepeatedEvalReport, console: Console | None = None) -> None:
+    """Print one line per run, then the mean and spread of each headline metric."""
+    console = console or Console()
+    table = Table(
+        title=(f"{len(report.runs)} runs - scenario: {report.scenario}, engine: {report.engine}"),
+        header_style="bold",
+    )
+    table.add_column("run")
+    for label, _ in HEADLINE_METRICS:
+        table.add_column(label)
+    table.add_column("seconds")
+    for number, run in enumerate(report.runs, start=1):
+        table.add_row(
+            str(number),
+            *(f"{getattr(run, attribute):.0%}" for _, attribute in HEADLINE_METRICS),
+            f"{run.wall_seconds:.0f}",
+        )
+    table.add_row(
+        "[bold]mean[/bold]",
+        *(f"[bold]{report.mean(attribute):.0%}[/bold]" for _, attribute in HEADLINE_METRICS),
+        f"{report.wall_seconds:.0f}",
+    )
+    console.print(table)
+    console.print(
+        " | ".join(
+            f"{label} {low:.0%}-{high:.0%}"
+            for label, attribute in HEADLINE_METRICS
+            for low, high in [report.spread(attribute)]
+        )
+        + "   (min-max across runs)"
+    )

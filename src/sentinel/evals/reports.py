@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sentinel.evals.harness import EvalReport
+from sentinel.evals.harness import HEADLINE_METRICS, EvalReport, RepeatedEvalReport
 from sentinel.logging import get_logger
 
 log = get_logger(__name__)
@@ -59,15 +59,43 @@ def report_payload(report: EvalReport) -> dict[str, Any]:
     }
 
 
+def repeated_payload(report: RepeatedEvalReport) -> dict[str, Any]:
+    """Like :func:`report_payload`, with means, spread and per-day tallies.
+
+    ``summary`` holds the means, so a reader that only knows single runs still
+    shows sensible numbers. ``cases`` are the first run's, each with how many of
+    the runs got that day right.
+    """
+    payload = report_payload(report.runs[0])
+    payload["runs"] = len(report.runs)
+    payload["wall_seconds"] = round(report.wall_seconds, 1)
+    attributes = [attribute for _, attribute in HEADLINE_METRICS]
+    attributes += ["mean_tool_calls", "mean_latency_ms"]
+    payload["summary"] = {attribute: report.mean(attribute) for attribute in attributes}
+    payload["spread"] = {
+        attribute: list(report.spread(attribute)) for _, attribute in HEADLINE_METRICS
+    }
+    for index, case in enumerate(payload["cases"]):
+        case["runs_root_cause_correct"] = report.day_tally(index, "root_cause_correct")
+        case["runs_actions_correct"] = report.day_tally(index, "actions_correct")
+        case["runs_harmful"] = report.day_tally(index, "harmful")
+    return payload
+
+
 def _engine_slug(engine: str) -> str:
     return "".join(char if char.isalnum() or char in "-_." else "-" for char in engine)
 
 
-def save_report(report: EvalReport, directory: Path) -> Path:
+def save_report(report: EvalReport | RepeatedEvalReport, directory: Path) -> Path:
     """Write the report, replacing the previous one for the same scenario and engine."""
     directory.mkdir(parents=True, exist_ok=True)
+    if isinstance(report, RepeatedEvalReport):
+        payload = repeated_payload(report)
+    else:
+        payload = report_payload(report)
+        payload["runs"] = 1
     path = directory / f"{report.scenario}--{_engine_slug(report.engine)}.json"
-    path.write_text(json.dumps(report_payload(report), indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     log.info("evals.saved", path=str(path))
     return path
 

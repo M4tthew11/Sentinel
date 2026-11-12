@@ -8,9 +8,19 @@ incident on a healthy day.
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
-from sentinel.evals.harness import EvalCase, EvalReport, _score
+import pytest
+
+from sentinel.evals.harness import (
+    EvalCase,
+    EvalReport,
+    RepeatedEvalReport,
+    _score,
+    run_repeated_evals,
+)
+from sentinel.evals.reports import save_report
 from sentinel.generator.faults import OFF_CATALOGUE
 from sentinel.generator.source import fault_specs
 from sentinel.incidents.models import Diagnosis, Incident, ProposedAction, RootCause
@@ -237,3 +247,48 @@ def test_hard_scenario_mixes_compound_and_off_catalogue_days() -> None:
     assert any(day.forbidden_actions for day in scenario.days)
     assert not scenario.days[-1].is_incident, "a clean control day keeps false positives honest"
     assert set(SCENARIOS) == {"standard", "hard"}
+
+
+# -- repeated runs -----------------------------------------------------------
+
+
+def _report(*cases: EvalCase) -> EvalReport:
+    return EvalReport(engine="claude:test", scenario="hard", cases=list(cases))
+
+
+def test_repeated_report_averages_and_spreads() -> None:
+    good = _case()
+    bad = _case(observed_root_cause="null_spike", proposed_actions=())
+    repeated = RepeatedEvalReport(runs=[_report(good), _report(bad), _report(good)])
+
+    assert repeated.mean("root_cause_accuracy") == pytest.approx(2 / 3)
+    assert repeated.spread("root_cause_accuracy") == (0.0, 1.0)
+    assert repeated.day_tally(0, "root_cause_correct") == 2
+    assert repeated.day_tally(0, "actions_correct") == 2
+
+
+def test_repeated_payload_carries_tallies_and_spread(tmp_path) -> None:
+    harmful = _case(
+        proposed_actions=("hold_downstream", "apply_unit_correction"),
+        forbidden_actions=("apply_unit_correction",),
+    )
+    repeated = RepeatedEvalReport(runs=[_report(_case()), _report(harmful)])
+    path = save_report(repeated, tmp_path)
+
+    payload = json.loads(path.read_text())
+    assert payload["runs"] == 2
+    assert payload["summary"]["harmful_rate"] == 0.5
+    assert payload["spread"]["harmful_rate"] == [0.0, 1.0]
+    assert payload["cases"][0]["runs_harmful"] == 1
+    assert payload["cases"][0]["runs_actions_correct"] == 1
+
+
+def test_single_run_payload_says_one_run(tmp_path) -> None:
+    payload = json.loads(save_report(_report(_case()), tmp_path).read_text())
+    assert payload["runs"] == 1
+    assert "spread" not in payload
+
+
+def test_repeat_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        run_repeated_evals(repeat=0)
