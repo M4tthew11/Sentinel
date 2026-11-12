@@ -425,14 +425,31 @@ async function renderIncident(view, incidentId) {
 
 // -- evals -----------------------------------------------------------------
 
-function metricTile(label, value, invert) {
+function metricTile(label, value, invert, spread) {
   const good = value == null ? "" : (invert ? value === 0 : value === 1) ? "yes" : "";
+  const range = spread && spread[0] !== spread[1]
+    ? `<div class="muted" style="font-size:12px">range ${pct(spread[0])}&ndash;${pct(spread[1])}</div>` : "";
   return `<div class="metric"><div class="label">${esc(label)}</div>
-          <div class="value ${good}">${pct(value)}</div></div>`;
+          <div class="value ${good}">${pct(value)}</div>${range}</div>`;
+}
+
+function verdict(c, runs) {
+  if (runs > 1) {
+    // Over several runs a day is rarely all-or-nothing; show the tally.
+    const harmful = c.runs_harmful || 0;
+    const right = c.runs_actions_correct || 0;
+    if (harmful) return pill(`harmful ${harmful}/${runs}`, "harmful");
+    if (!right) return pill(`incomplete ${runs}/${runs}`, "warning");
+    return pill(`right fix ${right}/${runs}`, right === runs ? "ok" : "warning");
+  }
+  return c.harmful ? pill("harmful", "harmful")
+    : c.actions_correct ? pill("right fix", "ok") : pill("incomplete", "warning");
 }
 
 function evalBlock(report) {
   const s = report.summary;
+  const runs = report.runs || 1;
+  const spread = report.spread || {};
   const rows = report.cases.map((c) => {
     const observed = [c.observed_root_cause, ...c.observed_contributing].join(" + ");
     const expected = c.expected_causes.join(" + ") || "none";
@@ -441,20 +458,22 @@ function evalBlock(report) {
       <td class="mono">${esc(expected)}</td>
       <td class="mono ${c.expected_causes.length ? (c.root_cause_correct ? "yes" : "no") : ""}">${esc(observed)}</td>
       <td class="mono">${esc(c.proposed_actions.join(", ") || "-")}</td>
-      <td>${c.harmful ? pill("harmful", "harmful") : c.actions_correct ? pill("right fix", "ok") : pill("incomplete", "warning")}</td>
+      <td>${verdict(c, runs)}</td>
       <td>${pill(c.final_status, c.final_status)}</td></tr>`;
   }).join("");
+  const runNote = runs > 1
+    ? ` &middot; mean of ${runs} runs; diagnosed, proposed and status are from run 1` : "";
   return `<div class="panel">
       <div class="row" style="margin-bottom:10px">
         <h3 style="margin:0">${esc(report.engine)}</h3>
-        <span class="muted">saved ${esc(new Date(report.saved_at).toLocaleString())} &middot; ${esc(report.wall_seconds)}s</span>
+        <span class="muted">saved ${esc(new Date(report.saved_at).toLocaleString())} &middot; ${esc(report.wall_seconds)}s${runNote}</span>
       </div>
       <div class="metrics">
-        ${metricTile("detection", s.detection_rate)}
-        ${metricTile("root cause", s.root_cause_accuracy)}
-        ${metricTile("causes found", s.cause_coverage)}
-        ${metricTile("right actions", s.action_accuracy)}
-        ${metricTile("harmful", s.harmful_rate, true)}
+        ${metricTile("detection", s.detection_rate, false, spread.detection_rate)}
+        ${metricTile("root cause", s.root_cause_accuracy, false, spread.root_cause_accuracy)}
+        ${metricTile("causes found", s.cause_coverage, false, spread.cause_coverage)}
+        ${metricTile("right actions", s.action_accuracy, false, spread.action_accuracy)}
+        ${metricTile("harmful", s.harmful_rate, true, spread.harmful_rate)}
       </div>
       <div class="scroll" style="margin-top:12px"><table>
         <tr><th>date</th><th>dataset</th><th>injected</th><th>diagnosed</th><th>proposed</th><th>verdict</th><th>status</th></tr>

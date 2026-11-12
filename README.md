@@ -310,15 +310,44 @@ root cause. *Harmful* is the share of days where it proposed an action that woul
 make things worse, such as rescaling a whole partition when only a third of it
 changed unit.
 
-```
-detection 100% | root cause 100% | causes found 75% | actions 0% | harmful 25%   # engine: rules
+#### Rules against Claude
+
+| | rules | Claude |
+|---|---|---|
+| detection | 100% | 100% |
+| root cause | 100% | 100% |
+| causes found | 75% | **100%** |
+| right actions | 0% | **75%** |
+| harmful | 25% | **0%** |
+| wall time | ~20 s | ~163 s |
+
+*Claude: one run of `sentinel eval --scenario hard`, default model and effort,
+November 2026. Rules: deterministic, so one run is every run.*
+
+The decision tree names a plausible headline every day and still gets every day
+wrong. It stops at the first matching rule, so it fixes half of each compound
+fault, and it proposes a full-partition unit correction for a change that only hit
+some stores. That correction would have put every store outside its normal range.
+
+The Claude engine named both causes on both compound days. It refused the blanket
+correction, holding the date and raising a ticket instead, and it called the netted
+returns `unknown` rather than forcing them into a category. Its one miss is day 1:
+it found the unit change but held the date and asked upstream instead of proposing
+a correction. That is a defensible, cautious call that the scenario still scores as
+incomplete.
+
+**This is one run of a nondeterministic engine on five hand-written days.** It
+shows where the decision tree breaks and that an LLM can close the gap. It does not
+measure how reliably it does. For that, use `--repeat`:
+
+```bash
+sentinel eval --scenario hard --repeat 5
 ```
 
-The decision tree names a plausible headline every time and still gets every day
-wrong: it stops at the first matching rule, so it fixes half of each compound
-fault, and it confidently proposes a full-partition unit correction for a partial
-one. That is the gap an LLM engine has to close to be worth its latency, and
-`sentinel eval --scenario hard` with `ANTHROPIC_API_KEY` set measures it.
+This replays the scenario five times from a fresh warehouse and reports the mean
+and the min-max range of each metric, plus, per day, in how many runs the engine
+got it right. The console's Evals view shows the same. Budget about five times the
+single-run time and tokens.
 
 The scenario also caught a verification gap. On day 1, deduplicating made every
 contract pass, so the incident used to close as `resolved` while units were still
@@ -363,7 +392,7 @@ make test       # pytest with coverage
 make demo       # the full scenario
 ```
 
-118 tests, about four minutes, entirely offline. They exercise the real warehouse
+132 tests, about four minutes, entirely offline. They exercise the real warehouse
 rather than mocks, so a broken SQL string fails a test; the Claude engine is
 tested against a stubbed client, including its failure and fallback paths.
 

@@ -447,9 +447,23 @@ def eval_command(
             "'hard' (compound and off-catalogue faults)."
         ),
     ] = "standard",
+    repeat: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            max=20,
+            help="Replay the scenario this many times and report the mean and spread. "
+            "Worth it for the LLM engine, whose answers vary between runs.",
+        ),
+    ] = 1,
 ) -> None:
     """Score the diagnosis engine against the golden incident set."""
-    from sentinel.evals.harness import render_report, run_evals
+    from sentinel.evals.harness import (
+        render_repeated,
+        render_report,
+        run_evals,
+        run_repeated_evals,
+    )
     from sentinel.evals.reports import EVAL_REPORT_DIR, save_report
     from sentinel.scenario import SCENARIOS
 
@@ -461,14 +475,25 @@ def eval_command(
     settings = get_settings()
     if rules_only:
         settings.agent.provider = AgentProvider.RULES
-    report = run_evals(settings, scenario=SCENARIOS[scenario](), fresh=not keep)
-    render_report(report, console)
-    saved = save_report(report, settings.data_dir / EVAL_REPORT_DIR)
+    if repeat > 1 and keep:
+        raise typer.BadParameter("--keep cannot be combined with --repeat", param_hint="--keep")
+
+    if repeat == 1:
+        report = run_evals(settings, scenario=SCENARIOS[scenario](), fresh=not keep)
+        render_report(report, console)
+        saved = save_report(report, settings.data_dir / EVAL_REPORT_DIR)
+        worst = report.root_cause_accuracy
+    else:
+        repeated = run_repeated_evals(settings, scenario=SCENARIOS[scenario](), repeat=repeat)
+        render_repeated(repeated, console)
+        saved = save_report(repeated, settings.data_dir / EVAL_REPORT_DIR)
+        # A gate is only as good as its worst run.
+        worst = repeated.spread("root_cause_accuracy")[0]
     console.print(f"[dim]report saved to {saved}; the console shows it under Evals[/dim]")
 
-    if report.root_cause_accuracy < min_accuracy:
+    if worst < min_accuracy:
         console.print(
-            f"[red]FAIL[/red] root-cause accuracy {report.root_cause_accuracy:.0%} "
+            f"[red]FAIL[/red] root-cause accuracy {worst:.0%} "
             f"is below the required {min_accuracy:.0%}"
         )
         raise typer.Exit(code=1)
