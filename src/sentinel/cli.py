@@ -450,6 +450,7 @@ def eval_command(
 ) -> None:
     """Score the diagnosis engine against the golden incident set."""
     from sentinel.evals.harness import render_report, run_evals
+    from sentinel.evals.reports import EVAL_REPORT_DIR, save_report
     from sentinel.scenario import SCENARIOS
 
     if scenario not in SCENARIOS:
@@ -462,6 +463,8 @@ def eval_command(
         settings.agent.provider = AgentProvider.RULES
     report = run_evals(settings, scenario=SCENARIOS[scenario](), fresh=not keep)
     render_report(report, console)
+    saved = save_report(report, settings.data_dir / EVAL_REPORT_DIR)
+    console.print(f"[dim]report saved to {saved}; the console shows it under Evals[/dim]")
 
     if report.root_cause_accuracy < min_accuracy:
         console.print(

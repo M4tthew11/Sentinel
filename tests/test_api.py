@@ -9,7 +9,10 @@ from fastapi.testclient import TestClient
 
 from sentinel.api import main as api
 from sentinel.api.auth import APPROVER_TOKENS_ENV, parse_approver_tokens
+from sentinel.evals.harness import EvalCase, EvalReport
+from sentinel.evals.reports import EVAL_REPORT_DIR, save_report
 from sentinel.generator.faults import FaultSpec, FaultType
+from sentinel.generator.source import generate_day
 from sentinel.incidents.models import ActionStatus, IncidentStatus
 from sentinel.incidents.store import IncidentStore
 from sentinel.monitor import monitor
@@ -264,3 +267,154 @@ def test_token_parsing() -> None:
     for bad in ("alice", f":{ALICE_TOKEN}", "alice:", f"a:{ALICE_TOKEN},b:{ALICE_TOKEN}"):
         with pytest.raises(ValueError):
             parse_approver_tokens(bad)
+
+
+# --------------------------------------------------------------------------
+# Console support: metric series, action previews, saved evals
+# --------------------------------------------------------------------------
+
+
+def test_metric_series_has_one_point_per_date_after_a_rebuild(
+    client, settings, with_incident, next_day
+) -> None:
+    incident_id, index = _pending(client)
+    # Approving reruns the pipeline for the incident date.
+    client.post(f"/api/incidents/{incident_id}/actions/{index}/approve")
+    incident = client.get(f"/api/incidents/{incident_id}").json()
+
+    payload = client.get(
+        "/api/metrics",
+        params={
+            "dataset": "pos_sales",
+            "metric": "measure_sum__units_sold",
+            "until": next_day.isoformat(),
+        },
+    ).json()
+    dates = [point["business_date"] for point in payload["points"]]
+    assert len(dates) == len(set(dates))
+    assert dates[-1] == next_day.isoformat()
+
+    # The series holds the corrected value; the incident keeps what detection saw.
+    detected = next(
+        signal["observed"]
+        for signal in incident["anomalies"]
+        if signal["metric"] == "measure_sum__units_sold"
+    )
+    assert detected > 5 * payload["points"][-1]["value"]
+
+
+def test_metric_series_respects_until(client, with_incident, next_day) -> None:
+    payload = client.get(
+        "/api/metrics",
+        params={"dataset": "pos_sales", "metric": "row_count", "until": "2025-03-05"},
+    ).json()
+    assert all(point["business_date"] <= "2025-03-05" for point in payload["points"])
+
+
+def test_unit_correction_preview_states_the_corrected_total(client, with_incident) -> None:
+    incident_id, index = _pending(client)
+    preview = client.get(f"/api/incidents/{incident_id}/actions/{index}/preview").json()
+
+    assert preview["name"] == "apply_unit_correction"
+    assert preview["risk"] == "high"
+    assert preview["rebuilds_silver"] is True
+    text = " ".join(preview["effects"])
+    assert "multiplied by" in text
+    # The corrected day should land close to a normal one.
+    assert "of normal" in text
+    percent = int(text.split("of normal")[0].rsplit(" ", 2)[-2].rstrip("%"))
+    assert 80 <= percent <= 120
+
+
+def test_preview_never_changes_anything(client, settings, with_incident) -> None:
+    incident_id, index = _pending(client)
+    before = client.get(f"/api/incidents/{incident_id}").json()
+    client.get(f"/api/incidents/{incident_id}/actions/{index}/preview")
+    after = client.get(f"/api/incidents/{incident_id}").json()
+    assert before == after
+
+
+def test_preview_of_a_missing_action_is_a_404(client, with_incident) -> None:
+    incident_id, _ = _pending(client)
+    assert client.get(f"/api/incidents/{incident_id}/actions/99/preview").status_code == 404
+    assert client.get("/api/incidents/INC-nope/actions/0/preview").status_code == 404
+
+
+def test_saved_eval_reports_are_served(client, settings) -> None:
+    assert client.get("/api/evals").json() == []
+
+    report = EvalReport(
+        engine="rules",
+        scenario="hard",
+        cases=[
+            EvalCase(
+                business_date="2025-02-17",
+                dataset="pos_sales",
+                expected_root_cause="unit_of_measure",
+                observed_root_cause="unit_of_measure",
+                expected_actions=("hold_downstream",),
+                proposed_actions=("apply_unit_correction",),
+                incident_opened=True,
+                forbidden_actions=("apply_unit_correction",),
+            )
+        ],
+    )
+    save_report(report, settings.data_dir / EVAL_REPORT_DIR)
+    (settings.data_dir / EVAL_REPORT_DIR / "broken.json").write_text("{not json")
+
+    reports = client.get("/api/evals").json()
+    assert len(reports) == 1
+    assert reports[0]["scenario"] == "hard"
+    assert reports[0]["summary"]["harmful_rate"] == 1.0
+    assert reports[0]["cases"][0]["harmful"] is True
+
+
+def test_console_views_are_routed_and_escape_api_text(client, with_incident) -> None:
+    body = client.get("/").text
+    for marker in ("#/evals", "/preview", "/api/metrics", "function esc("):
+        assert marker in body
+    # Every value interpolated into markup goes through esc(); the one unescaped
+    # interpolation the old page had (incident text) must not come back.
+    assert "${incident.title}" not in body
+    assert "${incident.summary}" not in body
+
+
+def test_preview_confirms_a_uniform_unit_change_fits_every_store(client, with_incident) -> None:
+    incident_id, index = _pending(client)
+    effects = client.get(f"/api/incidents/{incident_id}/actions/{index}/preview").json()["effects"]
+    assert any("fits every one" in effect for effect in effects)
+    assert not any(effect.startswith("Warning") for effect in effects)
+
+
+def test_preview_warns_when_only_some_stores_changed_unit(
+    client, settings, seeded, next_day
+) -> None:
+    """The total looks fixed either way; only the per-store view shows the damage."""
+    generate_day(
+        next_day,
+        {
+            "pos_sales": FaultSpec(
+                "pos_sales",
+                FaultType.PARTIAL_UNIT_CHANGE,
+                magnitude=0.3,
+                metadata={"factor": "12"},
+            )
+        },
+        settings,
+    )
+    monitor(next_day, seeded, settings, "test")
+    seeded.close()
+
+    incident_id, index = _pending(client)
+    preview = client.get(f"/api/incidents/{incident_id}/actions/{index}/preview").json()
+    assert preview["name"] == "apply_unit_correction"
+    warning = next(effect for effect in preview["effects"] if effect.startswith("Warning"))
+    assert "stores" in warning
+
+
+def test_preview_of_an_executed_action_does_not_recompute(client, with_incident) -> None:
+    incident_id, index = _pending(client)
+    client.post(f"/api/incidents/{incident_id}/actions/{index}/approve")
+    preview = client.get(f"/api/incidents/{incident_id}/actions/{index}/preview").json()
+    assert preview["effects"][0].startswith("Already executed")
+    assert len(preview["effects"]) == 1
