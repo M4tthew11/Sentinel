@@ -36,6 +36,18 @@ class FaultType(StrEnum):
     LATE_ARRIVAL = "late_arrival"
     REFERENTIAL_BREAK = "referential_break"
 
+    # Off-catalogue faults. Nothing in the rule engine, the root-cause vocabulary
+    # or the agent prompt describes them; they exist to measure what an engine
+    # does with a failure nobody enumerated.
+    PARTIAL_UNIT_CHANGE = "partial_unit_change"
+    NEGATED_RETURNS = "negated_returns"
+
+
+#: Fault types that have no root-cause label and no rule of their own.
+OFF_CATALOGUE: frozenset[FaultType] = frozenset(
+    {FaultType.PARTIAL_UNIT_CHANGE, FaultType.NEGATED_RETURNS}
+)
+
 
 @dataclass(frozen=True)
 class FaultProfile:
@@ -105,6 +117,27 @@ FAULT_LIBRARY: dict[FaultType, FaultProfile] = {
         ),
         expected_actions=("quarantine_invalid_rows", "open_upstream_ticket"),
     ),
+    FaultType.PARTIAL_UNIT_CHANGE: FaultProfile(
+        description=(
+            "A measure jumps on a normal row count, but only some reporting units "
+            "changed unit, so there is no single factor that corrects the whole partition."
+        ),
+        upstream_story=(
+            "Part of the retailer's estate was migrated to a new POS release that "
+            "reports cases instead of eaches; the rest of the stores were not."
+        ),
+        expected_actions=("hold_downstream", "open_upstream_ticket"),
+    ),
+    FaultType.NEGATED_RETURNS: FaultProfile(
+        description=(
+            "A share of rows carries negative quantities for a measure that is never negative."
+        ),
+        upstream_story=(
+            "The source started netting customer returns into the sales feed as "
+            "negative quantities instead of sending them separately."
+        ),
+        expected_actions=("hold_downstream", "open_upstream_ticket"),
+    ),
 }
 
 
@@ -130,18 +163,24 @@ _DEFAULT_TARGETS: dict[str, dict[FaultType, str]] = {
         FaultType.NULL_SPIKE: "units_sold",
         FaultType.SCHEMA_DRIFT: "units_sold",
         FaultType.UNIT_OF_MEASURE: "units_sold",
+        FaultType.PARTIAL_UNIT_CHANGE: "units_sold",
+        FaultType.NEGATED_RETURNS: "units_sold",
         FaultType.REFERENTIAL_BREAK: "sku_id",
     },
     "shipments": {
         FaultType.NULL_SPIKE: "cases_shipped",
         FaultType.SCHEMA_DRIFT: "gross_value_usd",
         FaultType.UNIT_OF_MEASURE: "cases_shipped",
+        FaultType.PARTIAL_UNIT_CHANGE: "cases_shipped",
+        FaultType.NEGATED_RETURNS: "cases_shipped",
         FaultType.REFERENTIAL_BREAK: "sku_id",
     },
     "inventory": {
         FaultType.NULL_SPIKE: "on_hand_cases",
         FaultType.SCHEMA_DRIFT: "on_hand_cases",
         FaultType.UNIT_OF_MEASURE: "on_hand_cases",
+        FaultType.PARTIAL_UNIT_CHANGE: "on_hand_cases",
+        FaultType.NEGATED_RETURNS: "on_hand_cases",
         FaultType.REFERENTIAL_BREAK: "sku_id",
     },
 }
@@ -254,6 +293,31 @@ def apply_fault(
         # duplicate-key failure as well, which muddies what the fault is testing.
         unknown = [f"{UNKNOWN_SKU_PREFIX}{100 + int(position) % 900:03d}" for position in index]
         corrupted.loc[corrupted.index[index], column] = unknown
+        return corrupted
+
+    if spec.fault_type is FaultType.PARTIAL_UNIT_CHANGE:
+        # Whole reporting units switch, not random rows: a POS release rolls out
+        # store by store. ``magnitude`` is the share of units that switched.
+        column = target_column(spec)
+        _require_column(corrupted, column, spec)
+        group_column = VOLUME_GROUP_COLUMN[spec.dataset]
+        groups = corrupted[group_column].dropna().unique()
+        switched_count = min(len(groups), max(1, round(len(groups) * spec.magnitude)))
+        switched = set(rng.choice(groups, size=switched_count, replace=False))
+        factor = float(spec.metadata.get("factor", "12"))
+        mask = corrupted[group_column].isin(switched)
+        corrupted[column] = corrupted[column].astype(float)
+        corrupted.loc[mask, column] = (corrupted.loc[mask, column] * factor).round(3)
+        return corrupted
+
+    if spec.fault_type is FaultType.NEGATED_RETURNS:
+        column = target_column(spec)
+        _require_column(corrupted, column, spec)
+        count = max(1, round(len(corrupted) * spec.magnitude))
+        index = rng.choice(len(corrupted), size=count, replace=False)
+        corrupted[column] = corrupted[column].astype(float)
+        rows = corrupted.index[index]
+        corrupted.loc[rows, column] = -corrupted.loc[rows, column].abs()
         return corrupted
 
     raise ValueError(f"Unhandled fault type: {spec.fault_type}")

@@ -292,6 +292,36 @@ def test_claude_engine_parses_a_submitted_diagnosis(settings, warehouse) -> None
     assert "temperature" not in client.messages.calls[0]
 
 
+def test_claude_engine_parses_contributing_causes(settings, warehouse) -> None:
+    client = _StubClient(
+        [
+            _Response(
+                [
+                    _submit_block(
+                        root_cause="duplicate_batch",
+                        contributing_causes=[
+                            "unit_of_measure",
+                            "duplicate_batch",  # the primary again: dropped
+                            "not_a_cause",  # outside the vocabulary: dropped
+                            "unit_of_measure",  # repeated: dropped
+                        ],
+                        confidence=0.7,
+                        summary="Delivered twice and in cases.",
+                        reasoning="Duplicate keys, and units per row up 12x.",
+                        proposed_actions=[{"name": "enable_dedupe"}],
+                    )
+                ]
+            ),
+        ]
+    )
+    engine = ClaudeEngine(settings.agent, client=client)  # type: ignore[arg-type]
+    diagnosis = engine.diagnose(
+        DiagnosisRequest(incident=_incident(), warehouse=warehouse, settings=settings)
+    )
+    assert diagnosis.root_cause is RootCause.DUPLICATE_BATCH
+    assert diagnosis.contributing_causes == [RootCause.UNIT_OF_MEASURE]
+
+
 def test_claude_engine_degrades_to_rules_on_api_error(settings, warehouse) -> None:
     error = anthropic.APIConnectionError(request=httpx.Request("POST", "https://api.example"))
     engine = ClaudeEngine(settings.agent, client=_StubClient([error]))  # type: ignore[arg-type]

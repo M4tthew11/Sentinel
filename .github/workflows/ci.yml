@@ -72,6 +72,10 @@ jobs:
         # Fails the build if the platform stops correctly identifying every
         # injected fault - a regression gate on behaviour, not just on units.
         run: sentinel eval --rules-only --min-accuracy 1.0
+      - name: Report the rule baseline on compound and off-catalogue faults
+        # Not a gate: the decision tree is expected to fall short here. The
+        # numbers are the baseline an LLM engine is compared against.
+        run: sentinel eval --rules-only --scenario hard
 
   docker:
     name: container image

@@ -9,6 +9,7 @@ import pytest
 from sentinel.config import RemediationMode
 from sentinel.elt import ops
 from sentinel.generator.faults import FaultSpec, FaultType
+from sentinel.generator.source import generate_day
 from sentinel.incidents.models import (
     ActionStatus,
     Diagnosis,
@@ -180,6 +181,52 @@ def test_verification_reports_an_unfixed_incident_as_remediated(
 
     assert outcome.verified_healthy is False
     assert incident.status is IncidentStatus.REMEDIATED
+
+
+def test_verification_does_not_resolve_while_metrics_are_still_wrong(
+    settings, seeded, next_day
+) -> None:
+    """Deduplicating fixes the contract, not the unit change hiding behind it."""
+    generate_day(
+        next_day,
+        {
+            "pos_sales": (
+                FaultSpec("pos_sales", FaultType.DUPLICATE_BATCH, magnitude=0.3),
+                FaultSpec(
+                    "pos_sales",
+                    FaultType.UNIT_OF_MEASURE,
+                    column="units_sold",
+                    metadata={"factor": "12"},
+                ),
+            )
+        },
+        settings,
+    )
+    refresh_run(next_day, seeded, settings, "test")
+
+    incident = _incident([ProposedAction(name="enable_dedupe")], next_day, dataset="pos_sales")
+    outcome = RemediationExecutor(seeded, settings).apply(incident)
+
+    assert outcome.verified_healthy is False
+    assert incident.status is IncidentStatus.REMEDIATED
+    verification = next(event for event in incident.timeline if event.event == "verification")
+    assert "still anomalous" in verification.detail
+    assert "units_sold" in verification.detail
+
+
+def test_verification_ignores_the_delivered_row_count(settings, seeded, next_day) -> None:
+    """A duplicated file stays too long in bronze; silver is what has to be right."""
+    generate_day(
+        next_day,
+        {"shipments": FaultSpec("shipments", FaultType.DUPLICATE_BATCH, magnitude=0.5)},
+        settings,
+    )
+    refresh_run(next_day, seeded, settings, "test")
+
+    incident = _incident([ProposedAction(name="enable_dedupe")], next_day, dataset="shipments")
+    RemediationExecutor(seeded, settings).apply(incident)
+
+    assert incident.status is IncidentStatus.RESOLVED
 
 
 def test_action_limit_is_enforced(settings, warehouse) -> None:

@@ -111,6 +111,13 @@ class Diagnosis(BaseModel):
     """The agent's conclusion about an incident."""
 
     root_cause: RootCause = RootCause.UNKNOWN
+    contributing_causes: list[RootCause] = Field(default_factory=list)
+    """Further causes active on the same partition, beyond the primary one.
+
+    Faults do not queue politely: a load can be duplicated *and* in the wrong
+    unit. An engine that names only the first thing it finds fixes half the day.
+    """
+
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     summary: str = ""
     reasoning: str = ""

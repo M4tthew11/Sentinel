@@ -24,6 +24,7 @@ from sentinel.incidents.models import (
     RiskLevel,
 )
 from sentinel.logging import get_logger
+from sentinel.quality.metrics import ROW_COUNT
 from sentinel.remediation.actions import ACTIONS, ActionContext
 from sentinel.runner import refresh_run
 
@@ -200,30 +201,47 @@ class RemediationExecutor:
         )
 
     def _verify(self, incident: Incident, business_date: date) -> bool:
-        """Re-run and re-check the business date; returns whether it is now clean."""
+        """Re-run and re-check the business date; returns whether it is now clean.
+
+        Clean means both halves of detection agree: no critical check fails *and*
+        the metrics are back inside their historical baseline. Checking only the
+        contracts would call a partition "resolved" after deduplicating it while a
+        unit change on the same rows is still inflating every figure, because no
+        contract describes what a unit change looks like.
+        """
         observation = refresh_run(
             business_date,
             self.warehouse,
             self.settings,
             triggered_by=f"remediation:{incident.incident_id}",
-            detect=False,
         )
         remaining = observation.failing_checks(incident.dataset)
-        healthy = not observation.has_critical_failure(incident.dataset)
-        incident.log_event(
-            self.actor,
-            "verification",
-            (
-                "all critical checks pass after remediation"
-                if healthy
-                else f"{len(remaining)} check(s) still failing: "
-                + ", ".join(result.check_name for result in remaining)
-            ),
+        contracts_hold = not observation.has_critical_failure(incident.dataset)
+        detection = observation.detections.get(incident.dataset)
+        # Row count measures what was *delivered*; no warehouse-side fix changes
+        # it, so a duplicated file stays "too many rows" in bronze forever. Only
+        # the value metrics, built from silver, say whether the fix worked.
+        drifting = (
+            [signal.metric for signal in detection.signals if signal.metric != ROW_COUNT]
+            if detection
+            else []
         )
+        healthy = contracts_hold and not drifting
+
+        if healthy:
+            detail = "all critical checks pass and metrics are back within baseline"
+        elif not contracts_hold:
+            detail = f"{len(remaining)} check(s) still failing: " + ", ".join(
+                result.check_name for result in remaining
+            )
+        else:
+            detail = "checks pass but metrics are still anomalous: " + ", ".join(drifting)
+        incident.log_event(self.actor, "verification", detail)
         log.info(
             "remediation.verified",
             incident_id=incident.incident_id,
             dataset=incident.dataset,
             healthy=healthy,
+            anomalous_metrics=drifting,
         )
         return healthy
