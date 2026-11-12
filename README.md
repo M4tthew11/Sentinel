@@ -312,16 +312,16 @@ changed unit.
 
 #### Rules against Claude
 
-| | rules | Claude |
+| | rules | Claude (mean of 5 runs) |
 |---|---|---|
-| detection | 100% | 100% |
-| root cause | 100% | 100% |
-| causes found | 75% | **100%** |
-| right actions | 0% | **75%** |
-| harmful | 25% | **0%** |
-| wall time | ~20 s | ~163 s |
+| detection | 100% | 100% (every run) |
+| root cause | 100% | 100% (every run) |
+| causes found | 75% | **100%** (every run) |
+| right actions | 0% | **95%** (75%-100%) |
+| harmful | 25% | **0%** (every run) |
+| wall time per run | ~20 s | ~160 s |
 
-*Claude: one run of `sentinel eval --scenario hard`, default model and effort,
+*Claude: `sentinel eval --scenario hard --repeat 5`, default model and effort,
 November 2026. Rules: deterministic, so one run is every run.*
 
 The decision tree names a plausible headline every day and still gets every day
@@ -329,16 +329,17 @@ wrong. It stops at the first matching rule, so it fixes half of each compound
 fault, and it proposes a full-partition unit correction for a change that only hit
 some stores. That correction would have put every store outside its normal range.
 
-The Claude engine named both causes on both compound days. It refused the blanket
-correction, holding the date and raising a ticket instead, and it called the netted
-returns `unknown` rather than forcing them into a category. Its one miss is day 1:
-it found the unit change but held the date and asked upstream instead of proposing
-a correction. That is a defensible, cautious call that the scenario still scores as
-incomplete.
+In all five runs the Claude engine named both causes on both compound days,
+refused the blanket correction on the partial unit change (holding the date and
+raising a ticket instead), and called the netted returns `unknown` rather than
+forcing them into a category. The only variation was day 1, the duplicated file
+that was also in cases. In four runs out of five it proposed both dedupe and the
+unit correction. In the fifth it found both causes but held the date and asked
+upstream instead of correcting, a cautious call the scenario scores as incomplete.
 
-**This is one run of a nondeterministic engine on five hand-written days.** It
-shows where the decision tree breaks and that an LLM can close the gap. It does not
-measure how reliably it does. For that, use `--repeat`:
+This is still five hand-written days, so it shows where the decision tree breaks
+and that an LLM closes the gap consistently, not how it would fare on a real
+estate. To reproduce:
 
 ```bash
 sentinel eval --scenario hard --repeat 5
