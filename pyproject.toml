@@ -41,7 +41,7 @@ dev = [
 sentinel = "sentinel.cli:app"
 
 [project.urls]
-Repository = "https://github.com/mmagierski/sentinel"
+Repository = "https://github.com/M4tthew11/Sentinel"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sentinel"]

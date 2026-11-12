@@ -167,13 +167,40 @@ function renderIncident(incident) {
     </div>`;
 }
 
-async function decide(incidentId, index, verb) {
+const TOKEN_KEY = "sentinel.approverToken";
+
+function storedToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY); } catch (error) { return null; }
+}
+
+function rememberToken(token) {
   try {
-    await json(`/api/incidents/${incidentId}/actions/${index}/${verb}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ approver: "dashboard-operator" })
-    });
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch (error) { /* storage unavailable: the token lasts for this call only */ }
+}
+
+async function postDecision(url, token) {
+  const headers = { "content-type": "application/json" };
+  if (token) headers["authorization"] = `Bearer ${token}`;
+  return fetch(url, { method: "POST", headers, body: "{}" });
+}
+
+async function decide(incidentId, index, verb) {
+  const url = `/api/incidents/${incidentId}/actions/${index}/${verb}`;
+  try {
+    let token = storedToken();
+    let response = await postDecision(url, token);
+    if (response.status === 401) {
+      // The server is in token mode: who approves is decided by the token,
+      // so ask for one rather than sending a self-declared name.
+      rememberToken(null);
+      token = prompt("Approver token");
+      if (!token) return;
+      response = await postDecision(url, token);
+      if (response.ok) rememberToken(token);
+    }
+    if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
     await refresh();
   } catch (error) {
     alert(error.message);

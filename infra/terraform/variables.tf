@@ -48,12 +48,6 @@ variable "retention_days" {
   }
 }
 
-variable "api_max_replicas" {
-  description = "Upper bound on API replicas."
-  type        = number
-  default     = 3
-}
-
 variable "remediation_mode" {
   description = "auto lets low-risk actions self-apply; manual requires approval for everything."
   type        = string
@@ -75,6 +69,22 @@ variable "anthropic_secret_name" {
   description = "Name of the Key Vault secret holding the Anthropic API key. Empty disables it."
   type        = string
   default     = ""
+}
+
+variable "approver_tokens_secret_name" {
+  description = <<-EOT
+    Name of the Key Vault secret holding approver tokens ("name:token,name:token").
+    Empty leaves the console read-only from outside: approvals are refused unless
+    the caller is on the loopback interface.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "warehouse_share_quota_gb" {
+  description = "Size of the Azure Files share holding the DuckDB warehouse, in GB."
+  type        = number
+  default     = 10
 }
 
 variable "tags" {

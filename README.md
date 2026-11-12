@@ -314,7 +314,7 @@ make test       # pytest with coverage
 make demo       # the full scenario
 ```
 
-95 tests, about four minutes, entirely offline. They exercise the real warehouse
+103 tests, about four minutes, entirely offline. They exercise the real warehouse
 rather than mocks, so a broken SQL string fails a test; the Claude engine is
 tested against a stubbed client, including its failure and fallback paths.
 
@@ -328,9 +328,25 @@ platform stops identifying every injected fault, and a container build.
 
 `docker compose` is the local path. [`infra/terraform`](infra/terraform) is the
 same thing on Azure: Container Apps for the console, a scheduled Container Apps
-Job for the nightly pipeline, ADLS Gen2 for the layers, Key Vault for the API key,
-and a managed identity so nothing carries a connection string. Storage account
-keys are disabled outright.
+Job for the nightly pipeline, an Azure Files share that both mount for the
+warehouse file, ADLS Gen2 for the layers, Key Vault for the secrets, and a managed
+identity so the application carries no connection string.
+
+### Who may approve
+
+Approving or rejecting an action changes production data, so the console has to
+know who is asking. Set `SENTINEL_APPROVER_TOKENS` to `name:token` pairs and every
+write needs `Authorization: Bearer <token>`; the approver recorded on the incident
+is the name that token belongs to, never a name the client sent. With no tokens
+configured, writes are accepted only from the loopback interface, so
+`sentinel serve` on a laptop needs no setup and a deployment that forgot to
+configure tokens fails closed. Reads stay open either way.
+
+```bash
+export SENTINEL_APPROVER_TOKENS="alice:$(openssl rand -hex 24)"
+curl -X POST -H "Authorization: Bearer <alice's token>" \
+     http://localhost:8000/api/incidents/INC-xxxx/actions/1/approve
+```
 
 `remediation_mode` defaults to `manual` there. Autonomy is opt-in per environment:
 nothing self-applies in a new deployment until someone has watched it propose the

@@ -38,6 +38,21 @@ terraform apply
 - **`remediation_mode` defaults to `manual`.** Autonomy is opt-in per
   environment: nothing self-applies in a new deployment until someone has watched
   it propose the right thing a few times.
+- **The warehouse lives on an Azure Files share** mounted at `/data` by both the
+  console and the pipeline job. Without it each container would get its own
+  ephemeral disk and the console would never see a pipeline run. Container Apps
+  mounts Azure Files only with an account key, so the share sits in its own small
+  storage account; the data lake keeps shared keys disabled, and the key is held
+  by the Container Apps environment, never by the application.
+- **The console runs as one replica.** DuckDB allows one writing process per file
+  and the approval endpoints write. Scaling out means moving the operational
+  tables to a server database first.
+- **Approvals need a token.** Store `name:token` pairs in Key Vault and set
+  `approver_tokens_secret_name`. Until then the console is read-only from outside:
+  the API refuses writes from anything but the loopback interface.
+- **Secrets are Key Vault references**, resolved by the platform with the managed
+  identity, so neither the Anthropic key nor the approver tokens appear in the
+  container definition or in Terraform state.
 - **Purge protection is on in prod only**, so a `dev` environment can be
   destroyed and recreated without waiting out the soft-delete window.
 

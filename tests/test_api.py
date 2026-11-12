@@ -8,17 +8,30 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sentinel.api import main as api
+from sentinel.api.auth import APPROVER_TOKENS_ENV, parse_approver_tokens
 from sentinel.generator.faults import FaultSpec, FaultType
 from sentinel.incidents.models import ActionStatus, IncidentStatus
 from sentinel.incidents.store import IncidentStore
 from sentinel.monitor import monitor
+
+LOCAL = ("127.0.0.1", 50000)
+REMOTE = ("203.0.113.7", 50000)
+ALICE_TOKEN = "alice-token-0123456789"
+BOB_TOKEN = "bob-token-9876543210"
 
 
 @pytest.fixture
 def client(settings, monkeypatch) -> TestClient:
     """A test client bound to the isolated settings."""
     monkeypatch.setattr(api, "get_settings", lambda: settings)
-    return TestClient(api.app)
+    monkeypatch.delenv(APPROVER_TOKENS_ENV, raising=False)
+    return TestClient(api.app, client=LOCAL)
+
+
+@pytest.fixture
+def remote_client(client) -> TestClient:
+    """The same service, called from another machine."""
+    return TestClient(api.app, client=REMOTE)
 
 
 @pytest.fixture
@@ -170,3 +183,84 @@ def test_business_date_is_validated(client, with_incident) -> None:
 def test_incidents_are_serialised_with_dates_as_strings(client, with_incident) -> None:
     payload = client.get("/api/incidents").json()[0]
     assert payload["business_date"] == str(date.fromisoformat(payload["business_date"]))
+
+
+# --------------------------------------------------------------------------
+# Who may approve
+# --------------------------------------------------------------------------
+
+
+def _pending(client: TestClient) -> tuple[str, int]:
+    """The incident id and action index awaiting approval."""
+    incident_id = client.get("/api/incidents").json()[0]["incident_id"]
+    detail = client.get(f"/api/incidents/{incident_id}").json()
+    index = next(
+        position
+        for position, action in enumerate(detail["actions"])
+        if action["status"] == "awaiting_approval"
+    )
+    return incident_id, index
+
+
+@pytest.mark.parametrize("verb", ["approve", "reject"])
+def test_remote_writes_are_refused_without_configured_tokens(
+    remote_client, with_incident, verb
+) -> None:
+    incident_id, index = _pending(remote_client)
+    response = remote_client.post(
+        f"/api/incidents/{incident_id}/actions/{index}/{verb}", json={"approver": "mallory"}
+    )
+    assert response.status_code == 403
+    detail = remote_client.get(f"/api/incidents/{incident_id}").json()
+    assert detail["actions"][index]["status"] == "awaiting_approval"
+
+
+def test_remote_reads_stay_open(remote_client, with_incident) -> None:
+    assert remote_client.get("/api/incidents").status_code == 200
+
+
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer not-a-real-token-000"}])
+def test_token_mode_rejects_missing_and_wrong_tokens(
+    client, with_incident, monkeypatch, headers
+) -> None:
+    monkeypatch.setenv(APPROVER_TOKENS_ENV, f"alice:{ALICE_TOKEN}")
+    incident_id, index = _pending(client)
+    # Being on the loopback interface is no longer enough once tokens exist.
+    response = client.post(f"/api/incidents/{incident_id}/actions/{index}/approve", headers=headers)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_approver_is_taken_from_the_token_not_the_body(
+    remote_client, with_incident, monkeypatch
+) -> None:
+    monkeypatch.setenv(APPROVER_TOKENS_ENV, f"alice:{ALICE_TOKEN}, bob:{BOB_TOKEN}")
+    incident_id, index = _pending(remote_client)
+    response = remote_client.post(
+        f"/api/incidents/{incident_id}/actions/{index}/approve",
+        json={"approver": "someone-else"},
+        headers={"Authorization": f"Bearer {BOB_TOKEN}"},
+    )
+    assert response.status_code == 200
+    detail = remote_client.get(f"/api/incidents/{incident_id}").json()
+    assert detail["actions"][index]["actor"] == "bob"
+    assert "someone-else" not in str(detail)
+
+
+def test_misconfigured_tokens_disable_approvals(client, with_incident, monkeypatch) -> None:
+    monkeypatch.setenv(APPROVER_TOKENS_ENV, "alice:short")
+    incident_id, index = _pending(client)
+    response = client.post(f"/api/incidents/{incident_id}/actions/{index}/approve")
+    assert response.status_code == 503
+    assert "short" not in response.text
+
+
+def test_token_parsing() -> None:
+    assert parse_approver_tokens("") == {}
+    assert parse_approver_tokens(f" alice:{ALICE_TOKEN} ,bob:{BOB_TOKEN},") == {
+        ALICE_TOKEN: "alice",
+        BOB_TOKEN: "bob",
+    }
+    for bad in ("alice", f":{ALICE_TOKEN}", "alice:", f"a:{ALICE_TOKEN},b:{ALICE_TOKEN}"):
+        with pytest.raises(ValueError):
+            parse_approver_tokens(bad)
