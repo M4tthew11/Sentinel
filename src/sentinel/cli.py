@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import shutil
 import sys
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import typer
 from rich.console import Console
@@ -37,6 +38,52 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+DATE_HELP = (
+    "Business date, YYYY-MM-DD. Defaults to SENTINEL_BUSINESS_DATE, "
+    "then to yesterday in SENTINEL_BUSINESS_TIMEZONE."
+)
+
+
+def resolve_business_date(
+    value: str | None, settings: Settings, now: datetime | None = None
+) -> date:
+    """Work out which business date a run is for.
+
+    A scheduled job has no way to compute a date in its argument list, so the
+    date is optional and resolved here, at run time: the explicit argument wins,
+    then ``SENTINEL_BUSINESS_DATE``, then the day before today in the business
+    timezone - a nightly run processes the day that has just closed.
+
+    Args:
+        value: The date given on the command line, if any.
+        settings: Settings carrying the override and the business timezone.
+        now: Clock override for tests; must be timezone-aware.
+
+    Returns:
+        The business date to process.
+
+    Raises:
+        typer.BadParameter: If the date or the timezone cannot be parsed.
+    """
+    explicit = value or settings.business_date
+    if explicit:
+        try:
+            return date.fromisoformat(explicit)
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"{explicit!r} is not a date; expected YYYY-MM-DD.", param_hint="business_date"
+            ) from exc
+    try:
+        zone = ZoneInfo(settings.business_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(
+            f"{settings.business_timezone!r} is not an IANA timezone.",
+            param_hint="SENTINEL_BUSINESS_TIMEZONE",
+        ) from exc
+    today = (now or datetime.now(UTC)).astimezone(zone).date()
+    return today - timedelta(days=1)
+
 
 STATUS_STYLE = {
     "resolved": "green",
@@ -255,11 +302,11 @@ def generate(
 
 @app.command()
 def run(
-    business_date: Annotated[str, typer.Argument(help="Business date, YYYY-MM-DD.")],
+    business_date: Annotated[str | None, typer.Argument(help=DATE_HELP)] = None,
 ) -> None:
     """Run the pipeline and quality checks for one date, without the agent."""
     settings = get_settings()
-    target = date.fromisoformat(business_date)
+    target = resolve_business_date(business_date, settings)
     with open_warehouse(settings) as warehouse:
         observation = refresh_run(target, warehouse, settings, "cli")
     failed = [
@@ -276,12 +323,12 @@ def run(
 
 @app.command("monitor")
 def monitor_command(
-    business_date: Annotated[str, typer.Argument(help="Business date, YYYY-MM-DD.")],
+    business_date: Annotated[str | None, typer.Argument(help=DATE_HELP)] = None,
     remediate: Annotated[bool, typer.Option(help="Apply the proposed actions.")] = True,
 ) -> None:
     """Run, detect, diagnose and (optionally) repair one business date."""
     settings = get_settings()
-    target = date.fromisoformat(business_date)
+    target = resolve_business_date(business_date, settings)
     with open_warehouse(settings) as warehouse:
         result = monitor(target, warehouse, settings, "cli", remediate=remediate)
         _render_day(result, "")
