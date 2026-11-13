@@ -30,6 +30,9 @@ from sentinel.scenario import DEFAULT_SCENARIO, Scenario, ScenarioDay
 
 log = get_logger(__name__)
 
+#: The tool whose use the harness reports as "history consulted".
+HISTORY_TOOL = "find_similar_incidents"
+
 
 @dataclass
 class EvalCase:
@@ -49,6 +52,8 @@ class EvalCase:
     observed_contributing: tuple[str, ...] = ()
     forbidden_actions: tuple[str, ...] = ()
     final_status: str = "-"
+    consulted_history: bool = False
+    """Whether the engine looked up similar past incidents before concluding."""
 
     @property
     def expects_incident(self) -> bool:
@@ -138,6 +143,11 @@ class EvalReport:
         return _ratio([case.harmful for case in self.incident_cases])
 
     @property
+    def history_use_rate(self) -> float:
+        """Share of incident cases where the engine consulted incident history."""
+        return _ratio([case.consulted_history for case in self.incident_cases])
+
+    @property
     def mean_latency_ms(self) -> float:
         """Average diagnosis latency over incident cases."""
         values = [case.latency_ms for case in self.incident_cases]
@@ -214,6 +224,7 @@ def _score(day: ScenarioDay, incidents: list[Incident]) -> EvalCase:
     confidence = 0.0
     tool_calls = 0
     latency = 0
+    consulted_history = False
 
     if incident is not None and incident.diagnosis is not None:
         diagnosis = incident.diagnosis
@@ -223,6 +234,7 @@ def _score(day: ScenarioDay, incidents: list[Incident]) -> EvalCase:
         confidence = diagnosis.confidence
         tool_calls = diagnosis.tool_calls
         latency = diagnosis.latency_ms
+        consulted_history = HISTORY_TOOL in diagnosis.tools_used
     elif incident is None:
         observed = "none"
 
@@ -241,6 +253,7 @@ def _score(day: ScenarioDay, incidents: list[Incident]) -> EvalCase:
         observed_contributing=contributing,
         forbidden_actions=day.forbidden_actions,
         final_status=str(incident.status) if incident is not None else "-",
+        consulted_history=consulted_history,
     )
 
 
@@ -275,6 +288,7 @@ def render_report(report: EvalReport, console: Console | None = None) -> None:
         f"causes found {report.cause_coverage:.0%} | "
         f"actions {report.action_accuracy:.0%} | "
         f"harmful {report.harmful_rate:.0%} | "
+        f"history consulted {report.history_use_rate:.0%} | "
         f"{report.mean_tool_calls:.1f} tool calls/diagnosis | "
         f"{report.mean_latency_ms:.0f} ms/diagnosis | "
         f"{report.wall_seconds:.1f}s total"

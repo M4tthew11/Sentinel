@@ -34,6 +34,7 @@ def report_payload(report: EvalReport) -> dict[str, Any]:
             "cause_coverage": report.cause_coverage,
             "action_accuracy": report.action_accuracy,
             "harmful_rate": report.harmful_rate,
+            "history_use_rate": report.history_use_rate,
             "mean_tool_calls": report.mean_tool_calls,
             "mean_latency_ms": report.mean_latency_ms,
         },
@@ -53,6 +54,7 @@ def report_payload(report: EvalReport) -> dict[str, Any]:
                 "cause_coverage": case.cause_coverage,
                 "confidence": case.confidence,
                 "final_status": case.final_status,
+                "consulted_history": case.consulted_history,
             }
             for case in report.cases
         ],
@@ -70,7 +72,7 @@ def repeated_payload(report: RepeatedEvalReport) -> dict[str, Any]:
     payload["runs"] = len(report.runs)
     payload["wall_seconds"] = round(report.wall_seconds, 1)
     attributes = [attribute for _, attribute in HEADLINE_METRICS]
-    attributes += ["mean_tool_calls", "mean_latency_ms"]
+    attributes += ["history_use_rate", "mean_tool_calls", "mean_latency_ms"]
     payload["summary"] = {attribute: report.mean(attribute) for attribute in attributes}
     payload["spread"] = {
         attribute: list(report.spread(attribute)) for _, attribute in HEADLINE_METRICS

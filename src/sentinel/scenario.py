@@ -2,7 +2,8 @@
 
 ``standard`` injects one catalogued fault per day. ``hard`` is what the standard
 one cannot measure: several faults on the same partition, and faults nobody wrote
-a rule or a root-cause label for.
+a rule or a root-cause label for. ``recurring`` makes faults come back, which is
+the only way to see what an engine does with its own incident history.
 
 Used by three consumers, which is the point - the demo a reviewer runs, the eval
 harness that scores the agent, and the integration tests all exercise the same
@@ -267,10 +268,100 @@ def build_hard_scenario(history_start: date = date(2025, 1, 6)) -> Scenario:
     return Scenario(history_start=history_start, history_end=history_end, days=days, name="hard")
 
 
+def build_recurring_scenario(history_start: date = date(2025, 1, 6)) -> Scenario:
+    """Faults that come back, so the second occurrence has a precedent on record.
+
+    The first half of the week creates history; the second half is scored with
+    that history available through ``find_similar_incidents``. Two kinds of
+    second occurrence, because history can help and it can mislead:
+
+    * **True repeats.** The same fault again. A precedent that ended well is a
+      shortcut to the same answer.
+    * **A lookalike.** A unit change in *every* store opens the same incident as
+      the earlier change in *some* stores - same checks, same metrics, same
+      direction. The precedent was contained with a hold and a ticket; copying
+      that leaves a fixable partition unfixed. Only evidence from today's data
+      tells the two apart.
+    """
+    history_end = history_start + timedelta(days=HISTORY_DAYS - 1)
+    first = history_end + timedelta(days=1)
+
+    def day(offset: int) -> date:
+        return first + timedelta(days=offset)
+
+    def negated_returns(offset: int, note: str) -> ScenarioDay:
+        return ScenarioDay(
+            business_date=day(offset),
+            faults={"pos_sales": FaultSpec("pos_sales", FaultType.NEGATED_RETURNS, magnitude=0.25)},
+            dataset="pos_sales",
+            expected_root_cause=RootCause.UNKNOWN,
+            expected_actions=("hold_downstream", "open_upstream_ticket"),
+            forbidden_actions=("apply_unit_correction",),
+            note=note,
+        )
+
+    def truncated_shipments(offset: int, note: str) -> ScenarioDay:
+        return ScenarioDay(
+            business_date=day(offset),
+            faults={"shipments": FaultSpec("shipments", FaultType.VOLUME_DROP, magnitude=0.65)},
+            dataset="shipments",
+            expected_root_cause=RootCause.VOLUME_DROP,
+            expected_actions=("hold_downstream", "open_upstream_ticket"),
+            note=note,
+        )
+
+    days = (
+        negated_returns(0, "Returns arrive netted into sales as negative quantities."),
+        ScenarioDay(
+            business_date=day(1),
+            faults={
+                "pos_sales": FaultSpec(
+                    "pos_sales",
+                    FaultType.PARTIAL_UNIT_CHANGE,
+                    magnitude=0.3,
+                    metadata={"factor": "12"},
+                )
+            },
+            dataset="pos_sales",
+            expected_root_cause=RootCause.UNIT_OF_MEASURE,
+            expected_actions=("hold_downstream", "open_upstream_ticket"),
+            forbidden_actions=("apply_unit_correction",),
+            note="A POS release moved some stores to reporting cases; the rest did not.",
+        ),
+        truncated_shipments(2, "Upstream extract truncated halfway."),
+        ScenarioDay(business_date=day(3), note="Control day: nothing injected."),
+        negated_returns(4, "Repeat: the netted returns are back. Day 0 is the precedent."),
+        ScenarioDay(
+            business_date=day(5),
+            faults={
+                "pos_sales": FaultSpec(
+                    "pos_sales",
+                    FaultType.UNIT_OF_MEASURE,
+                    column="units_sold",
+                    metadata={"factor": "12"},
+                )
+            },
+            dataset="pos_sales",
+            expected_root_cause=RootCause.UNIT_OF_MEASURE,
+            expected_actions=("apply_unit_correction",),
+            note=(
+                "Lookalike: every store now reports cases. Day 1 looks the same and was "
+                "only contained; this one is fixable."
+            ),
+        ),
+        truncated_shipments(6, "Repeat: truncated again. Day 2 is the precedent."),
+        ScenarioDay(business_date=day(7), note="Control day: nothing injected."),
+    )
+    return Scenario(
+        history_start=history_start, history_end=history_end, days=days, name="recurring"
+    )
+
+
 DEFAULT_SCENARIO = build_scenario()
 
 #: Every scenario the CLI and the eval harness can replay, by name.
 SCENARIOS: dict[str, Callable[[], Scenario]] = {
     "standard": build_scenario,
     "hard": build_hard_scenario,
+    "recurring": build_recurring_scenario,
 }

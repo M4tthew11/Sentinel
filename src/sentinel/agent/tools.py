@@ -19,12 +19,16 @@ from sentinel.elt import ops
 from sentinel.elt.schema import COLUMN_TYPES
 from sentinel.elt.warehouse import Warehouse
 from sentinel.generator.source import DATASETS
+from sentinel.incidents.history import find_similar, signals
+from sentinel.incidents.models import Incident
+from sentinel.incidents.store import IncidentStore
 from sentinel.logging import get_logger
 
 log = get_logger(__name__)
 
 MAX_SAMPLE_ROWS = 20
 MAX_GROUPS = 25
+MAX_PRECEDENTS = 5
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -112,15 +116,42 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["dataset"],
         },
     },
+    {
+        "name": "find_similar_incidents",
+        "description": (
+            "Past incidents that share this incident's failed checks and anomalous "
+            "metrics, most similar first, with how each one ended: the root cause that "
+            "was named, every action and whether it was executed, failed or rejected by "
+            "a human (with the reason), and whether verification found the partition "
+            "healthy afterwards. Use it early to see whether this has happened before. "
+            "A precedent is a lead to test with the other tools, not evidence about "
+            "today's data: the same signals can have a different cause."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": f"1-{MAX_PRECEDENTS}, default 3."},
+                "same_dataset_only": {
+                    "type": "boolean",
+                    "description": "Ignore precedents from other datasets. Default false.",
+                },
+            },
+        },
+    },
 ]
 
 
 class Toolbox:
     """Executes investigation tool calls against the warehouse."""
 
-    def __init__(self, warehouse: Warehouse, default_date: date) -> None:
+    def __init__(
+        self, warehouse: Warehouse, default_date: date, incident: Incident | None = None
+    ) -> None:
         self.warehouse = warehouse
         self.default_date = default_date
+        self.incident = incident
+        """The incident under investigation; precedent lookup is relative to it."""
+
         self.call_log: list[str] = []
 
     # -- dispatch ----------------------------------------------------------
@@ -134,6 +165,7 @@ class Toolbox:
             "sample_rows": self.sample_rows,
             "count_rows_by": self.count_rows_by,
             "get_failed_checks": self.get_failed_checks,
+            "find_similar_incidents": self.find_similar_incidents,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -305,6 +337,27 @@ class Toolbox:
                 for row in rows
             ],
         }
+
+    def find_similar_incidents(
+        self, limit: int = 3, same_dataset_only: bool = False
+    ) -> dict[str, Any]:
+        """Closed incidents with the same signals as the current one, and their outcomes."""
+        if self.incident is None:
+            return {"error": "no incident in context to compare against"}
+        size = max(1, min(int(limit), MAX_PRECEDENTS))
+        matches = find_similar(
+            IncidentStore(self.warehouse),
+            self.incident,
+            limit=size,
+            same_dataset_only=bool(same_dataset_only),
+        )
+        result: dict[str, Any] = {
+            "compared_on": sorted(signals(self.incident)),
+            "precedents": [match.as_dict() for match in matches],
+        }
+        if not matches:
+            result["note"] = "no closed incident shares these signals; treat this one as new"
+        return result
 
 
 def _round(value: Any) -> float | None:

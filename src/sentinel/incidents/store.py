@@ -94,6 +94,24 @@ class IncidentStore:
         )
         return [Incident.from_json(str(value)) for value in frame["document"].tolist()]
 
+    def detected_before(self, incident: Incident, limit: int = 500) -> list[Incident]:
+        """Incidents detected strictly before ``incident``, newest first.
+
+        The history an engine may learn from when it diagnoses ``incident``:
+        never the incident itself, never anything that came after it.
+        """
+        frame = self.warehouse.fetch_df(
+            """
+            SELECT document
+            FROM ops_incident
+            WHERE detected_at < ? AND incident_id <> ?
+            ORDER BY detected_at DESC, incident_id DESC
+            LIMIT ?
+            """,
+            [incident.detected_at, incident.incident_id, limit],
+        )
+        return [Incident.from_json(str(value)) for value in frame["document"].tolist()]
+
     def open_incidents(self) -> list[Incident]:
         """Every incident that is neither resolved nor dismissed."""
         frame = self.warehouse.fetch_df(

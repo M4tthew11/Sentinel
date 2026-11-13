@@ -76,6 +76,10 @@ jobs:
         # Not a gate: the decision tree is expected to fall short here. The
         # numbers are the baseline an LLM engine is compared against.
         run: sentinel eval --rules-only --scenario hard
+      - name: Report the rule baseline on recurring faults
+        # Not a gate either: the rule engine does not read incident history, so
+        # this is the floor for an engine that does.
+        run: sentinel eval --rules-only --scenario recurring
 
   docker:
     name: container image

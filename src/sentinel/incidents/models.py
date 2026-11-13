@@ -126,6 +126,10 @@ class Diagnosis(BaseModel):
     """Which reasoning engine produced this, e.g. ``claude:claude-sonnet-5`` or ``rules``."""
 
     tool_calls: int = 0
+    tools_used: list[str] = Field(default_factory=list)
+    """Names of the investigation tools called, in order. Says *how* a conclusion
+    was reached - in particular whether incident history was consulted."""
+
     latency_ms: int = 0
 
 

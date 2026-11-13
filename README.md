@@ -239,7 +239,7 @@ docker compose up sentinel       # console on http://localhost:8000
 The interesting design constraint is that an LLM's output ends up changing
 production data. The split that makes that safe:
 
-**Reading** is what the tools do. All five are read-only:
+**Reading** is what the tools do. All six are read-only:
 
 | Tool | Answers |
 |---|---|
@@ -248,6 +248,7 @@ production data. The split that makes that safe:
 | `sample_rows` | what do the raw rows look like - or the ones that failed validation? |
 | `count_rows_by` | is the shortfall spread evenly, or did specific stores go silent? |
 | `get_failed_checks` | which contracts failed, with observed and threshold values? |
+| `find_similar_incidents` | has this happened before, and how did it end? |
 
 **Writing** is not something the agent can do at all. It ends its turn by calling
 `submit_diagnosis` with a root cause, a confidence, its reasoning and a list of
@@ -274,6 +275,41 @@ the executor permits cannot drift apart.
 Everything the agent reads from the warehouse is treated as untrusted input; the
 prompt says so explicitly, and the architecture means a row value that reads like
 an instruction still cannot cause a write.
+
+### Learning from incident history
+
+Every incident the loop closes is a labelled example: the signals that opened it,
+the diagnosis, each action and what became of it. `find_similar_incidents` hands
+the agent the closest ones before it diagnoses a new incident:
+
+```json
+{
+  "compared_on": ["anomaly:measure_avg:increase", "anomaly:measure_sum:increase"],
+  "precedents": [{
+    "incident_id": "INC-4f1c9a02d7", "dataset": "pos_sales", "similarity": 1.0,
+    "outcome": "a human rejected a proposed action - read the reason before repeating it",
+    "diagnosis": {"root_cause": "unit_of_measure", "summary": "..."},
+    "actions": [{"name": "apply_unit_correction", "status": "rejected",
+                 "result": "only the northern stores changed unit", "decided_by": "dana"}],
+    "verification": null
+  }]
+}
+```
+
+Three decisions shape it ([ADR 5](docs/adr/0005-precedents-not-embeddings.md)):
+
+- **Similarity is set overlap, not an embedding.** An incident's signature is the
+  checks that failed and the metrics that moved, with direction. Two incidents are
+  alike when those sets overlap, and each match says which signals it shares.
+- **Only incidents with an outcome count.** Resolved, contained, dismissed, or with
+  an action a human rejected. An incident still open is an opinion nobody tested.
+  Lookup also never sees the incident's own future, so a replayed eval stays honest.
+- **A precedent is a lead, not evidence.** The same signals can have another cause,
+  and past diagnoses came from an engine that can be wrong. The prompt tells the
+  agent to confirm a precedent against today's data, and not to re-propose an action
+  a human rejected unless today's evidence answers the reason they gave.
+
+The rule engine does not use history. It stays the deterministic baseline.
 
 ### Evals
 
@@ -309,6 +345,30 @@ engine named, since a diagnosis can now carry `contributing_causes` next to its
 root cause. *Harmful* is the share of days where it proposed an action that would
 make things worse, such as rescaling a whole partition when only a third of it
 changed unit.
+
+#### The recurring scenario
+
+`sentinel eval --scenario recurring` makes faults come back, which is the only way
+to see what an engine does with its own history:
+
+| Day | What went wrong upstream | Why it is there |
+|---|---|---|
+| 1 | Returns netted into sales as negatives | creates a precedent |
+| 2 | Only some stores switched to cases | creates a precedent, contained with hold and ticket |
+| 3 | Shipments extract truncated | creates a precedent |
+| 4 | *(nothing)* | control |
+| 5 | Returns netted again | **repeat**: day 1 is on record |
+| 6 | *Every* store switched to cases | **lookalike**: same signals as day 2, but this one is fixable |
+| 7 | Shipments truncated again | **repeat**: day 3 is on record |
+| 8 | *(nothing)* | control |
+
+Day 6 is the one that matters. An engine that copies the precedent holds and
+tickets a partition it could have corrected; only today's rows tell the two apart.
+The report adds *history consulted*: the share of diagnoses that called
+`find_similar_incidents`.
+
+Rule baseline: detection 100%, root cause 100%, right actions 50%, harmful 17%,
+history consulted 0%. The Claude engine has not been measured on this scenario yet.
 
 #### Rules against Claude
 
@@ -367,13 +427,13 @@ src/sentinel/
   detection/     seasonal robust z-score + IsolationForest over pipeline metrics
   agent/         investigation tools, prompts, the Claude engine, the rule engine
   remediation/   the action whitelist and the executor that enforces it
-  incidents/     the incident document and its store
+  incidents/     the incident document, its store, and precedent lookup
   evals/         scoring harness for the diagnosis engines
   api/           FastAPI service + a dependency-free console
   monitor.py     the loop that ties observation to healing
   scenario.py    the demo timeline, shared by the demo, the evals and the tests
 infra/terraform/ Azure Container Apps deployment
-docs/adr/        why the four load-bearing decisions were made
+docs/adr/        why the five load-bearing decisions were made
 ```
 
 ### Design decisions
@@ -382,6 +442,7 @@ docs/adr/        why the four load-bearing decisions were made
 - [ADR 2 - Incidents as documents](docs/adr/0002-incidents-as-documents.md)
 - [ADR 3 - Two diagnosis engines, one interface](docs/adr/0003-two-diagnosis-engines.md)
 - [ADR 4 - Remediation as a whitelist with a risk gate](docs/adr/0004-remediation-whitelist.md)
+- [ADR 5 - Precedents by signal overlap, not embeddings](docs/adr/0005-precedents-not-embeddings.md)
 
 ---
 
@@ -447,6 +508,10 @@ Worth being explicit about, since the demo makes it all look tidy:
   there is nothing to train on, so it is a robust z-score against a weekday
   baseline plus an IsolationForest. Once incidents accumulate, the labels the
   platform generates are exactly the training set a supervised model would need.
+- **History can repeat a mistake.** A precedent carries the diagnosis an engine made
+  at the time. Outcomes and human rejections are attached so a bad one is visible,
+  and the prompt asks for confirmation on today's data, but nothing stops a wrong
+  diagnosis that happened to end as `remediated` from being offered again.
 - **Freshness is not modelled.** The generator drops files immediately, so late
   arrival is modelled as absence rather than as lateness. A real deployment would
   measure the lag between the business date and the load.
