@@ -213,8 +213,10 @@ sentinel eval-review --rules-only  # check that no harmful action gets past the 
 
 `sentinel serve` is a single page with three views:
 
-- **Incidents** - counters and the incident list.
-- **One incident** - the diagnosis with its reasoning, failed checks and anomaly
+- **Incidents** - counters and the incident list, each with its priority, reach
+  and estimated loss.
+- **One incident** - the diagnosis with its reasoning, the blast radius with the
+  loss estimate and how it was built, failed checks and anomaly
   signals, a chart of the metric against its own history (the value as detected
   and after remediation), every action with a *What changes?* preview, and the
   timeline. For `apply_unit_correction` the preview gives the corrected total
@@ -395,6 +397,55 @@ Three decisions shape it ([ADR 5](docs/adr/0005-precedents-not-embeddings.md)):
 
 The rule engine does not use history. It stays the deterministic baseline.
 
+### Blast radius and estimated loss
+
+Every incident is assessed when it opens, before anyone diagnoses it: which
+reports, dashboards, models and decisions take data from the affected dataset,
+and roughly what is at stake in money.
+
+```
+* INC-0ecd139f50 pos_sales critical -> remediated
+    impact P1 | 7 downstream consumer(s) (3 decisions, 1 dashboard, 2 reports, 1 model)
+           | estimated loss ~$20,360 (range $10,180-$30,540)
+```
+
+Both come from one YAML file ([`impact.yml`](src/sentinel/impact/impact.yml),
+replaced with `SENTINEL_IMPACT__CONFIG_PATH`):
+
+```yaml
+assets:
+  demand_forecast:
+    kind: model
+    depends_on: [silver_pos_sales]
+  replenishment_orders:
+    kind: decision
+    name: Automatic replenishment orders
+    owner: Supply planning
+    criticality: critical
+    depends_on: [demand_forecast, silver_inventory, silver_shipments]
+cost_model:
+  exposure_hours: 8
+  cost_per_hour_by_kind: {report: 40, dashboard: 80, decision: 300}
+  cost_per_consumer: 50
+  cost_per_record: {default: 0.01, pos_sales: 0.02}
+```
+
+- **Lineage is declared and followed transitively.** A broken sales file reaches
+  the replenishment decision through the forecast, three hops away. Each consumer
+  is listed with the path that connects it to the dataset.
+- **The money figure is an estimate and says so.** It is the sum of three terms -
+  per consumer-hour, per consumer, per record - using the rates in the file. The
+  incident keeps the arithmetic and the assumptions beside the total, and reports
+  a range. It ranks incidents against each other; it is not a measured loss.
+- **The agent and the reviewer see it as context for urgency, not as evidence.**
+  The prompt tells the agent to contain first when decisions are downstream, and
+  that high stakes raise the bar for changing data. The hard rules never read it.
+
+`sentinel show <incident>` prints the full report, the console shows it on the
+incident page, and `sentinel impact [dataset]` lists what is downstream of a
+dataset without an incident. `sentinel impact --check` validates the file.
+See [ADR 7](docs/adr/0007-declared-lineage-and-estimated-loss.md).
+
 ### Evals
 
 `sentinel eval` replays the scenario and scores the engine against the injected
@@ -513,12 +564,13 @@ src/sentinel/
   remediation/   the action whitelist, the hard rules and the executor that enforces them
   review/        the independent action reviewer: Claude and rule implementations
   incidents/     the incident document, its store, and precedent lookup
+  impact/        declared lineage, blast radius and the loss estimate
   evals/         scoring harnesses for the diagnosis engines and the action gate
   api/           FastAPI service + a dependency-free console
   monitor.py     the loop that ties observation to healing
   scenario.py    the demo timeline, shared by the demo, the evals and the tests
 infra/terraform/ Azure Container Apps deployment
-docs/adr/        why the six load-bearing decisions were made
+docs/adr/        why the seven load-bearing decisions were made
 ```
 
 ### Design decisions
@@ -529,6 +581,7 @@ docs/adr/        why the six load-bearing decisions were made
 - [ADR 4 - Remediation as a whitelist with a risk gate](docs/adr/0004-remediation-whitelist.md)
 - [ADR 5 - Precedents by signal overlap, not embeddings](docs/adr/0005-precedents-not-embeddings.md)
 - [ADR 6 - An independent reviewer that can only narrow autonomy](docs/adr/0006-independent-action-review.md)
+- [ADR 7 - Declared lineage and a loss estimate that says it is one](docs/adr/0007-declared-lineage-and-estimated-loss.md)
 
 ---
 
@@ -598,6 +651,10 @@ Worth being explicit about, since the demo makes it all look tidy:
   at the time. Outcomes and human rejections are attached so a bad one is visible,
   and the prompt asks for confirmation on today's data, but nothing stops a wrong
   diagnosis that happened to end as `remediated` from being offered again.
+- **The loss estimate is arithmetic on assumptions.** The rates and the exposure
+  window in `impact.yml` are typed in, not measured, and the shipped ones are
+  illustrative. Lineage is per dataset, not per column, and it describes what an
+  incident puts at stake rather than what it cost after it was contained.
 - **Freshness is not modelled.** The generator drops files immediately, so late
   arrival is modelled as absence rather than as lateness. A real deployment would
   measure the lag between the business date and the load.

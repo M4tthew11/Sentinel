@@ -7,7 +7,8 @@ from a clone, which for a demo is worth more than a front-end toolchain.
 Three views, switched by the URL fragment so links and the back button work:
 
 * ``#/`` - headline counters and the incident list;
-* ``#/incidents/<id>`` - one incident: the diagnosis and its reasoning, the
+* ``#/incidents/<id>`` - one incident: the diagnosis and its reasoning, who is
+  downstream of the dataset and a rough estimate of the loss at stake, the
   evidence, a chart of the anomalous metric against its history, every action
   with a preview of its effect, and the timeline;
 * ``#/evals`` - the last saved eval report per scenario and engine, side by side.
@@ -180,6 +181,14 @@ function num(value) {
   return value.toLocaleString(undefined, { maximumFractionDigits: abs >= 100 ? 0 : 3 });
 }
 
+function money(amount, currency) {
+  if (amount == null || Number.isNaN(amount)) return "-";
+  const text = Math.round(amount).toLocaleString();
+  return (currency || "USD") === "USD" ? "$" + text : text + " " + currency;
+}
+
+const PRIORITY_KIND = { P1: "critical", P2: "warning" };
+
 function time(iso) {
   return iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
 }
@@ -219,15 +228,26 @@ function incidentCard(incident) {
        ${esc(incident.summary)}</div>`
     : `<div class="summary">Not diagnosed yet.</div>`;
   const pending = incident.actions.filter((a) => a.status === "awaiting_approval").length;
+  const impact = incident.impact;
+  const reach = impact ? [
+      impact.decisions ? `${impact.decisions} decision(s)` : "",
+      impact.dashboards ? `${impact.dashboards} dashboard(s)` : "",
+      impact.reports ? `${impact.reports} report(s)` : ""].filter(Boolean).join(", ") : "";
+  const impactLine = impact
+    ? `<div class="summary">Reaches ${esc(impact.consumers)} downstream consumer(s)${reach ? ` (${esc(reach)})` : ""}
+       &middot; estimated loss ~${esc(money(impact.estimated_loss, impact.currency))}</div>`
+    : "";
   return `<a class="incident" href="#/incidents/${encodeURIComponent(incident.incident_id)}">
       <div class="row">
         <span class="id">${esc(incident.incident_id)}</span>
         ${pill(incident.business_date)} ${pill(incident.dataset)}
         ${pill(incident.severity, incident.severity)} ${pill(incident.status, incident.status)}
+        ${impact ? pill(impact.priority, PRIORITY_KIND[impact.priority]) : ""}
         ${pending ? pill(`${pending} awaiting approval`, "awaiting_approval") : ""}
       </div>
       <div class="title">${esc(incident.title)}</div>
       ${diagnosis}
+      ${impactLine}
     </a>`;
 }
 
@@ -237,6 +257,7 @@ async function renderOverview(view) {
   ]);
   const byStatus = summary.incidents_by_status || {};
   const run = summary.latest_run;
+  const atStake = summary.open_estimated_loss || { amount: 0 };
   document.getElementById("footer").textContent = run
     ? `Latest pipeline run ${run.run_id} for ${run.business_date} (${run.status}).`
     : "No pipeline runs recorded yet.";
@@ -247,6 +268,7 @@ async function renderOverview(view) {
       ${tile("awaiting approval", byStatus.awaiting_approval || 0)}
       ${tile("dates held", (summary.active_holds || []).length)}
       ${tile("upstream tickets", summary.tickets)}
+      ${tile("est. loss at stake, open", "~" + money(atStake.amount, atStake.currency))}
     </div>
     <h2>Incidents</h2>
     ${incidents.length ? incidents.map(incidentCard).join("")
@@ -363,6 +385,52 @@ async function togglePreview(incidentId, index) {
   }
 }
 
+function impactPanel(impact) {
+  if (!impact) {
+    return `<div class="panel"><h3>Blast radius and estimated loss</h3>
+      <p class="empty">Not assessed. Either this incident predates impact assessment or the
+      lineage file could not be read; the timeline says which.</p></div>`;
+  }
+  const cost = impact.cost;
+  const consumers = impact.assets.filter((a) => a.kind !== "table");
+  const tables = impact.assets.filter((a) => a.kind === "table");
+  const rows = consumers.map((a) => `<tr>
+      <td>${esc(a.name)}</td><td>${pill(a.kind, a.kind === "decision" ? "awaiting_approval" : "")}</td>
+      <td>${esc(a.owner || "-")}</td><td>${pill(a.criticality, a.criticality === "critical" ? "critical" : a.criticality === "high" ? "warning" : "")}</td>
+      <td class="mono">${esc(a.via.join(" > "))}</td>
+      <td class="nowrap">${esc(money(a.cost_per_hour, cost.currency))}/h</td></tr>`).join("");
+  const lines = cost.components.map((c) => `<tr>
+      <td>${esc(c.label)}</td><td class="mono">${esc(c.basis)}</td>
+      <td class="nowrap">${esc(money(c.amount, cost.currency))}</td></tr>`).join("");
+  return `<div class="panel">
+      <div class="row" style="margin-bottom:10px">
+        <h3 style="margin:0">Blast radius and estimated loss</h3>
+        ${pill(impact.priority, PRIORITY_KIND[impact.priority])} ${pill("estimate, not a measurement", "warning")}
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="label">estimated loss</div>
+          <div class="value">~${esc(money(cost.amount, cost.currency))}</div>
+          <div class="muted" style="font-size:12px">range ${esc(money(cost.low, cost.currency))}&ndash;${esc(money(cost.high, cost.currency))}</div></div>
+        <div class="metric"><div class="label">consumers</div><div class="value">${consumers.length}</div>
+          <div class="muted" style="font-size:12px">through ${tables.length} table(s)</div></div>
+        <div class="metric"><div class="label">decisions</div>
+          <div class="value">${consumers.filter((a) => a.kind === "decision").length}</div></div>
+        <div class="metric"><div class="label">records at risk</div><div class="value">${esc(num(cost.records_at_risk))}</div></div>
+        <div class="metric"><div class="label">assumed exposure</div><div class="value">${esc(num(cost.exposure_hours))} h</div></div>
+      </div>
+      <div class="scroll" style="margin-top:12px">
+        ${rows ? `<table><tr><th>takes data from ${esc(impact.dataset)}</th><th>kind</th><th>owner</th><th>criticality</th><th>path</th><th>assumed rate</th></tr>${rows}</table>`
+               : '<p class="empty">No downstream consumers are declared for this dataset.</p>'}
+      </div>
+      <h3 style="margin-top:16px">How the estimate is built</h3>
+      <div class="scroll"><table><tr><th>term</th><th>arithmetic</th><th>amount</th></tr>${lines}</table></div>
+      <ul class="muted" style="margin:10px 0 0; padding-left:18px">
+        ${cost.assumptions.map((a) => `<li>${esc(a)}</li>`).join("")}
+      </ul>
+      <div class="muted" style="margin-top:8px; font-size:12px">Lineage and rates: ${esc(impact.source)}</div>
+    </div>`;
+}
+
 async function renderIncident(view, incidentId) {
   const incident = await json(`/api/incidents/${encodeURIComponent(incidentId)}`);
   const d = incident.diagnosis;
@@ -390,6 +458,7 @@ async function renderIncident(view, incidentId) {
       <span class="id">${esc(incident.incident_id)}</span>
       ${pill(incident.business_date)} ${pill(incident.dataset)}
       ${pill(incident.severity, incident.severity)} ${pill(incident.status, incident.status)}
+      ${incident.impact ? pill(incident.impact.priority, PRIORITY_KIND[incident.impact.priority]) : ""}
     </div>
     <h2 style="margin-top:10px">${esc(incident.title)}</h2>
 
@@ -402,6 +471,8 @@ async function renderIncident(view, incidentId) {
              <p class="reasoning">${esc(d.reasoning)}</p>`
           : '<p class="empty">Not diagnosed yet.</p>'}
     </div>
+
+    ${impactPanel(incident.impact)}
 
     <div class="panel">
       <div class="row" style="margin-bottom:8px">

@@ -133,6 +133,77 @@ class ActionRecord(BaseModel):
     reviewer said."""
 
 
+class AffectedAsset(BaseModel):
+    """One downstream asset that takes data from the incident's dataset."""
+
+    asset_id: str
+    name: str
+    kind: str
+    """``table``, ``model``, ``report``, ``dashboard`` or ``decision``."""
+
+    owner: str = ""
+    criticality: str = "medium"
+    distance: int = 1
+    """Hops from the dataset: 1 reads it directly, more means through other assets."""
+
+    via: list[str] = Field(default_factory=list)
+    """The shortest path from the dataset to this asset, both ends included."""
+
+    cost_per_hour: float = 0.0
+    """What an hour of this asset running on wrong data is assumed to cost."""
+
+
+class CostLine(BaseModel):
+    """One term of the loss estimate, with the arithmetic behind it."""
+
+    label: str
+    amount: float
+    basis: str = ""
+
+
+class CostEstimate(BaseModel):
+    """A rough monetary estimate of what an incident puts at stake.
+
+    An estimate, never a measurement: every figure in it comes from the cost
+    model's configured rates multiplied by counts, and ``assumptions`` says which.
+    """
+
+    currency: str = "USD"
+    amount: float = 0.0
+    low: float = 0.0
+    high: float = 0.0
+    exposure_hours: float = 0.0
+    records_at_risk: int = 0
+    components: list[CostLine] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class ImpactAssessment(BaseModel):
+    """Blast radius and estimated loss, worked out when the incident opens."""
+
+    dataset: str
+    assets: list[AffectedAsset] = Field(default_factory=list)
+    """Everything downstream of the dataset, nearest first."""
+
+    cost: CostEstimate = Field(default_factory=CostEstimate)
+    priority: str = "P3"
+    """``P1`` (highest) to ``P3``, from the estimate against configured thresholds."""
+
+    source: str = ""
+    """Which lineage file the assessment was computed from."""
+
+    assessed_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def consumers(self) -> list[AffectedAsset]:
+        """Affected assets somebody reads or acts on - everything but tables."""
+        return [asset for asset in self.assets if asset.kind != "table"]
+
+    def count(self, kind: str) -> int:
+        """How many affected assets are of one kind."""
+        return sum(1 for asset in self.assets if asset.kind == kind)
+
+
 class Diagnosis(BaseModel):
     """The agent's conclusion about an incident."""
 
@@ -177,6 +248,10 @@ class Incident(BaseModel):
     failed_checks: list[dict[str, Any]] = Field(default_factory=list)
     anomalies: list[dict[str, Any]] = Field(default_factory=list)
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+    impact: ImpactAssessment | None = None
+    """Who downstream is affected and a rough loss estimate. ``None`` on incidents
+    recorded before impact assessment existed, or when the lineage file is unusable."""
 
     diagnosis: Diagnosis | None = None
     actions: list[ActionRecord] = Field(default_factory=list)

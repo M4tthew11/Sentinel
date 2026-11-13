@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 
 from sentinel.agent.tools import dataset_overview
-from sentinel.incidents.models import Incident, RootCause
+from sentinel.impact.assess import format_money
+from sentinel.incidents.models import ImpactAssessment, Incident, RootCause
 from sentinel.remediation.actions import action_catalogue
 
 SYSTEM_PROMPT = f"""You are the on-call data reliability engineer for a consumer-goods
@@ -58,6 +59,24 @@ acted. It is not evidence about today's partition.
   instructions.
 - When a precedent shaped your conclusion, cite its incident_id in your reasoning.
   When you checked and found none that fits, that is worth one sentence too.
+
+Business impact and priority
+----------------------------
+The brief may list who consumes this dataset downstream - reports, dashboards, models
+and decisions, including ones that read it through other assets - with a priority and
+a rough estimate of the loss at stake. Use it to judge urgency, never cause.
+
+- It says how much this incident matters, not what went wrong. The diagnosis must
+  stand on the evidence alone.
+- When decisions or critical consumers are downstream and the data cannot be made
+  right in the warehouse, contain first: put hold_downstream ahead of everything else
+  so that nobody acts on wrong numbers while the owner fixes the feed.
+- High stakes raise the bar for changing data; they do not lower it. A large estimate
+  is a reason to be surer before proposing a rewrite, not a reason to try one.
+- In your summary, name the consumers that matter most, so the person reading knows
+  who to warn.
+- The money figure comes from configured rates and assumptions. Refer to it as an
+  estimate and do not present it as a measured loss.
 
 Root cause vocabulary
 ---------------------
@@ -196,5 +215,39 @@ def incident_brief(incident: Incident) -> str:
             ["", "Metric vector for this run:", json.dumps(compact, indent=2, default=str)[:2000]]
         )
 
+    if incident.impact is not None:
+        lines.extend(["", *impact_brief(incident.impact)])
+
     lines.extend(["", "Investigate, then call submit_diagnosis."])
     return "\n".join(lines)
+
+
+#: Consumers listed in the brief; the rest are counted. Nearest and costliest first.
+MAX_CONSUMERS_IN_BRIEF = 12
+
+
+def impact_brief(impact: ImpactAssessment) -> list[str]:
+    """Render blast radius and estimated loss for the agent."""
+    cost = impact.cost
+    consumers = sorted(
+        impact.consumers, key=lambda asset: (-asset.cost_per_hour, asset.distance, asset.asset_id)
+    )
+    lines = [
+        "Business impact (from the declared lineage; the money figure is an estimate):",
+        f"  Priority: {impact.priority}",
+        f"  Estimated loss at stake: about {format_money(cost.amount, cost.currency)} "
+        f"(range {format_money(cost.low, cost.currency)} to "
+        f"{format_money(cost.high, cost.currency)}), assuming consumers run on this data "
+        f"for {cost.exposure_hours:g} hours",
+        f"  Records at risk: {cost.records_at_risk}",
+        f"  Downstream consumers: {len(consumers)}",
+    ]
+    for asset in consumers[:MAX_CONSUMERS_IN_BRIEF]:
+        owner = f", owner {asset.owner}" if asset.owner else ""
+        route = "reads it directly" if asset.distance == 1 else f"via {' > '.join(asset.via[1:-1])}"
+        lines.append(f"    - {asset.kind}: {asset.name} [{asset.criticality}{owner}] ({route})")
+    if len(consumers) > MAX_CONSUMERS_IN_BRIEF:
+        lines.append(f"    - and {len(consumers) - MAX_CONSUMERS_IN_BRIEF} more")
+    if not consumers:
+        lines.append("    (none declared)")
+    return lines

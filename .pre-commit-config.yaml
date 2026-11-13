@@ -28,5 +28,6 @@ repos:
         additional_dependencies:
           - pydantic>=2.9
           - types-requests
+          - types-PyYAML
         args: [--config-file=pyproject.toml]
         pass_filenames: false

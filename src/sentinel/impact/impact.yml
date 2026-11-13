@@ -1,0 +1,141 @@
+# Lineage and cost model for impact assessment.
+#
+# Sentinel reads this file whenever an incident opens, to answer two questions:
+# who downstream takes data from the affected dataset, and roughly what is at
+# stake in money. This copy ships with the package and describes the demo
+# warehouse. Point SENTINEL_IMPACT__CONFIG_PATH at your own file to replace it,
+# and run `sentinel impact --check` after editing.
+#
+# Every number under cost_model is an assumption somebody typed, not something
+# Sentinel measured. The estimate is only as good as these rates.
+
+version: 1
+
+# The datasets incidents are opened on. Lineage starts here.
+sources: [pos_sales, shipments, inventory]
+
+# Everything built from those datasets. `depends_on` names sources or other
+# assets, so impact is followed transitively: a decision that reads a dashboard
+# that reads a gold table is affected by the dataset underneath all three.
+#
+#   kind         table | model | report | dashboard | decision
+#   criticality  low | medium | high | critical   (scales the hourly rate)
+#   cost_per_hour  optional; overrides the rate derived from kind x criticality
+assets:
+  silver_pos_sales:
+    kind: table
+    depends_on: [pos_sales]
+  silver_shipments:
+    kind: table
+    depends_on: [shipments]
+  silver_inventory:
+    kind: table
+    depends_on: [inventory]
+  gold_sku_daily:
+    kind: table
+    depends_on: [silver_pos_sales, silver_shipments, silver_inventory]
+  gold_brand_daily:
+    kind: table
+    depends_on: [gold_sku_daily]
+
+  store_sellout_report:
+    kind: report
+    name: Daily store sell-out report
+    owner: Sales operations
+    criticality: medium
+    depends_on: [silver_pos_sales]
+  otif_service_report:
+    kind: report
+    name: Customer service level (OTIF) report
+    owner: Customer logistics
+    criticality: medium
+    depends_on: [silver_shipments]
+  inventory_coverage_dashboard:
+    kind: dashboard
+    name: Inventory coverage dashboard
+    owner: Supply planning
+    criticality: high
+    depends_on: [silver_inventory, silver_shipments]
+  brand_performance_dashboard:
+    kind: dashboard
+    name: Brand performance dashboard
+    owner: Brand management
+    criticality: high
+    depends_on: [gold_brand_daily]
+  weekly_business_review:
+    kind: report
+    name: Weekly business review pack
+    owner: Commercial finance
+    criticality: high
+    depends_on: [brand_performance_dashboard, otif_service_report]
+
+  demand_forecast:
+    kind: model
+    name: SKU demand forecast
+    owner: Demand planning
+    criticality: high
+    depends_on: [silver_pos_sales]
+  replenishment_orders:
+    kind: decision
+    name: Automatic replenishment orders
+    owner: Supply planning
+    criticality: critical
+    depends_on: [demand_forecast, silver_inventory, silver_shipments]
+  promo_budget_allocation:
+    kind: decision
+    name: Promotion budget allocation
+    owner: Trade marketing
+    criticality: medium
+    depends_on: [store_sellout_report]
+  retailer_rebate_accruals:
+    kind: decision
+    name: Retailer rebate accruals
+    owner: Commercial finance
+    criticality: high
+    depends_on: [silver_pos_sales]
+
+cost_model:
+  currency: USD
+
+  # Hours the affected consumers are assumed to run on wrong or missing data
+  # before it is put right. One working day by default: a daily batch that goes
+  # wrong overnight is typically used until someone notices the next morning.
+  exposure_hours: 8
+
+  # What one hour of a consumer running on bad data is assumed to cost, by kind.
+  # Tables cost nothing in themselves; they matter through what reads them.
+  cost_per_hour_by_kind:
+    table: 0
+    model: 60
+    report: 40
+    dashboard: 80
+    decision: 300
+
+  # Multiplies the hourly rate above.
+  criticality_multiplier:
+    low: 0.5
+    medium: 1.0
+    high: 2.0
+    critical: 4.0
+
+  # A warning usually degrades a consumer rather than breaking it, so it is
+  # charged a share of the hourly rate.
+  severity_factor:
+    critical: 1.0
+    warning: 0.5
+
+  # Flat cost for every affected consumer: telling its owner and re-checking it.
+  cost_per_consumer: 50
+
+  # Cost of each record that is wrong or missing: reprocessing and reconciling.
+  cost_per_record:
+    default: 0.01
+    pos_sales: 0.02
+
+  # The estimate is reported as a range of +/- this share around the point value.
+  uncertainty: 0.5
+
+  # Estimates at or above these amounts make an incident P1 or P2; the rest are P3.
+  priority_thresholds:
+    p1: 20000
+    p2: 8000

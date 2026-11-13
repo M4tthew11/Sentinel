@@ -15,6 +15,7 @@ from sentinel.config import Settings, get_settings
 from sentinel.detection.detector import DetectionResult
 from sentinel.elt.warehouse import Warehouse
 from sentinel.generator.source import DATASETS
+from sentinel.impact import ImpactConfigError, assess_impact, headline
 from sentinel.incidents.models import Incident, IncidentStatus
 from sentinel.incidents.store import IncidentStore
 from sentinel.logging import get_logger
@@ -94,6 +95,7 @@ def monitor(
         incident = _open_incident(observation, dataset)
         if incident is None:
             continue
+        _assess(incident, settings)
         store.save(incident)
         result.incidents.append(incident)
 
@@ -156,6 +158,24 @@ def _open_incident(observation: RunObservation, dataset: str) -> Incident | None
         failed_checks=[check.check_name for check in failed],
     )
     return incident
+
+
+def _assess(incident: Incident, settings: Settings) -> None:
+    """Attach blast radius and estimated loss, before anyone diagnoses.
+
+    A broken lineage file must not stop incidents from being diagnosed and
+    repaired, so it costs the incident its impact section and nothing else. The
+    timeline says why, where an operator will look.
+    """
+    if not settings.impact.enabled:
+        return
+    try:
+        incident.impact = assess_impact(incident, settings)
+    except ImpactConfigError as error:
+        log.warning("impact.unavailable", incident_id=incident.incident_id, error=str(error))
+        incident.log_event("monitor", "impact.unavailable", str(error))
+        return
+    incident.log_event("monitor", "impact.assessed", headline(incident.impact))
 
 
 def _severity(failed: list[CheckResult], detection: DetectionResult | None) -> str:
