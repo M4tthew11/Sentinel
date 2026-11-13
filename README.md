@@ -90,6 +90,10 @@ Sentinel automates that middle part, and stops where automation should stop:
 - **Remediation is bounded.** The agent proposes action names from a registry;
   an executor validates them, refuses anything else, and blocks high-risk actions
   until a human approves. See [ADR 4](docs/adr/0004-remediation-whitelist.md).
+- **Nobody marks their own homework.** A second agent reviews every proposed
+  action without seeing the first one's reasoning. Only what it approves runs
+  unattended; whatever it doubts goes to a human, and so does anything high-risk,
+  whatever it thinks. See [ADR 6](docs/adr/0006-independent-action-review.md).
 - **Nothing is closed until it is verified.** The executor re-runs the pipeline,
   re-checks the contracts and re-scores the metrics against their baseline.
   `resolved` means the checks pass and the values look normal again. `remediated`
@@ -124,7 +128,8 @@ flowchart TB
     subgraph heal["self-healing loop"]
         INCIDENT[incident document]
         AGENT[diagnosis agent<br/>Claude tool-use / decision tree]
-        EXEC[remediation executor<br/>whitelist + risk gate]
+        REVIEW[action reviewer<br/>independent second opinion]
+        EXEC[remediation executor<br/>whitelist + hard rules]
         HUMAN[human approval]
     end
 
@@ -134,7 +139,9 @@ flowchart TB
     INCIDENT --> AGENT
     AGENT -->|read-only tools| warehouse
     AGENT -->|proposed actions| EXEC
-    EXEC -->|high risk| HUMAN
+    EXEC -->|incident + bare action| REVIEW
+    REVIEW -->|approve / escalate| EXEC
+    EXEC -->|high risk, out of scope or escalated| HUMAN
     HUMAN --> EXEC
     EXEC -->|config change| SILVER
     EXEC -->|verify| CHECKS
@@ -155,6 +162,7 @@ sequenceDiagram
     participant M as monitor
     participant A as agent
     participant E as executor
+    participant R as reviewer
     participant H as human
 
     P->>Q: metric vector for the business date
@@ -165,12 +173,15 @@ sequenceDiagram
     P-->>A: evidence
     A-->>M: root cause + confidence + proposed actions
     M->>E: apply
-    E->>E: validate against whitelist, check risk
-    alt low risk
+    E->>E: validate against whitelist
+    E->>R: incident + bare actions (no diagnosis, no rationale)
+    R-->>E: approve / escalate per action, with a reason
+    E->>E: hard rules (risk, scope), then the reviewer's verdict
+    alt low risk, in scope and approved by the reviewer
         E->>P: write config change, rebuild, re-check
         P-->>E: all critical checks pass
         E-->>M: resolved
-    else high risk
+    else high risk, out of scope, or escalated by the reviewer
         E-->>H: awaiting approval
         H->>E: approve (or reject, with a reason)
         E->>P: apply, rebuild, re-check
@@ -195,6 +206,7 @@ sentinel serve            # incident console on http://127.0.0.1:8000
 sentinel incidents        # the same thing in the terminal
 sentinel show INC-xxxx    # one incident, with the agent's reasoning and timeline
 sentinel eval --rules-only  # score the diagnosis engine against the golden set
+sentinel eval-review --rules-only  # check that no harmful action gets past the gate
 ```
 
 ### The console
@@ -261,8 +273,16 @@ proposal ──▶ in the whitelist? ──no──▶ recorded as failed, nothi
            arguments valid? ──no──▶ recorded as failed, nothing runs
                  │yes
                  ▼
-           risk = high? ──yes──▶ awaiting human approval
+           reviewer gives its verdict (recorded either way)
+                 │
+                 ▼
+           hard rule tripped? ──yes──▶ awaiting human approval
+           (risk = high, or another       (the reviewer's opinion is shown
+            dataset or date)               to the human, and decides nothing)
                  │no
+                 ▼
+           reviewer approved? ──no──▶ awaiting human approval
+                 │yes                    (also: no verdict, error, doubt)
                  ▼
            execute ──▶ rebuild ──▶ re-check ──▶ resolved / remediated
 ```
@@ -275,6 +295,70 @@ the executor permits cannot drift apart.
 Everything the agent reads from the warehouse is treated as untrusted input; the
 prompt says so explicitly, and the architecture means a row value that reads like
 an instruction still cannot cause a write.
+
+### The reviewer
+
+An agent that proposes an action and then decides it is safe to run has checked
+nothing. So the proposal goes to a second agent first, and that one is kept
+independent by what it is *not* given:
+
+- **It sees** the incident as the monitor recorded it - failed checks, anomaly
+  signals, the metric vector - and each action's name and arguments. The Claude
+  reviewer also gets the same six read-only tools, so it can go and look.
+- **It does not see** the diagnosis, the reasoning, or the rationale attached to
+  each action. Free-text arguments (a hold's `reason`, a ticket's `summary` and
+  `body`) are stripped as well: they are the one place the first agent could argue
+  its case to the second.
+
+It answers `approve` or `escalate` per action, with a reason. What that verdict
+can do is deliberately lopsided:
+
+| | Reviewer approves | Reviewer escalates, errors or says nothing |
+|---|---|---|
+| low / medium risk, in scope | runs | **human** |
+| high risk (`apply_unit_correction`) | **human** - verdict shown as advice | **human** |
+| another dataset or business date than the incident's | **human** | **human** |
+| `manual` mode | **human** | **human** |
+
+The rows that say *human* regardless are the hard rules. They live in
+[`remediation/policy.py`](src/sentinel/remediation/policy.py) as plain comparisons,
+are evaluated in the executor, and no verdict can lift them. A reviewer can
+therefore only ever *narrow* what runs unattended: before it existed, every
+low-risk proposal ran.
+
+Failure is closed. An API error, a refusal, an exhausted tool budget, an action
+missing from the answer, an exception in the reviewer - each one leaves the
+action waiting for a human. This is the opposite of the diagnosis engine, which
+falls back to rules when Claude is unavailable: a platform should keep
+diagnosing, but no verdict is not an approval.
+
+Like diagnosis, review has two implementations behind one protocol. The rule
+reviewer ([`review/rules.py`](src/sentinel/review/rules.py)) approves an action
+only when the monitor's own observations show the problem it fixes - dedupe when
+the uniqueness check failed, a column mapping when the canonical column is gone
+and the proposed source column really is new in the extract - and escalates
+everything it has no rule for. It runs offline, in CI and without a key.
+
+Every verdict is written to the incident: on the action (`review`, `hard_rules`)
+and on the timeline as `action.reviewed`, next to the reason an action is waiting.
+
+```bash
+sentinel eval-review --rules-only    # or without the flag, to score the Claude reviewer
+```
+
+`eval-review` injects a fault, opens the incident, and puts hand-written proposals
+in front of the gate - sound ones, and ones that would damage the day: quarantining
+a whole partition to cure duplicates, mapping a measure onto an unrelated column,
+a unit correction with the factor inverted, an action on yesterday's healthy
+partition. Nothing is executed; it records what *would* have run. It exits
+non-zero if a single harmful proposal is cleared, and CI runs it as a gate.
+
+| Reviewer | Harmful approved | Wrongly approved | Sound actions pre-approved |
+|---|---|---|---|
+| rules | **0 / 9** | 0 / 15 | 9 / 9 |
+
+Set `SENTINEL_REVIEWER__PROVIDER=off` to get the previous behaviour, where the
+risk level alone decides.
 
 ### Learning from incident history
 
@@ -426,14 +510,15 @@ src/sentinel/
   quality/       metric collection, declarative checks, Pydantic row contracts
   detection/     seasonal robust z-score + IsolationForest over pipeline metrics
   agent/         investigation tools, prompts, the Claude engine, the rule engine
-  remediation/   the action whitelist and the executor that enforces it
+  remediation/   the action whitelist, the hard rules and the executor that enforces them
+  review/        the independent action reviewer: Claude and rule implementations
   incidents/     the incident document, its store, and precedent lookup
-  evals/         scoring harness for the diagnosis engines
+  evals/         scoring harnesses for the diagnosis engines and the action gate
   api/           FastAPI service + a dependency-free console
   monitor.py     the loop that ties observation to healing
   scenario.py    the demo timeline, shared by the demo, the evals and the tests
 infra/terraform/ Azure Container Apps deployment
-docs/adr/        why the five load-bearing decisions were made
+docs/adr/        why the six load-bearing decisions were made
 ```
 
 ### Design decisions
@@ -443,6 +528,7 @@ docs/adr/        why the five load-bearing decisions were made
 - [ADR 3 - Two diagnosis engines, one interface](docs/adr/0003-two-diagnosis-engines.md)
 - [ADR 4 - Remediation as a whitelist with a risk gate](docs/adr/0004-remediation-whitelist.md)
 - [ADR 5 - Precedents by signal overlap, not embeddings](docs/adr/0005-precedents-not-embeddings.md)
+- [ADR 6 - An independent reviewer that can only narrow autonomy](docs/adr/0006-independent-action-review.md)
 
 ---
 

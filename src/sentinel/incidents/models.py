@@ -75,6 +75,25 @@ class RiskLevel(StrEnum):
     HIGH = "high"
 
 
+class ReviewVerdict(StrEnum):
+    """What the reviewer concluded about one proposed action."""
+
+    APPROVE = "approve"
+    """The evidence supports the action; it may run without a human."""
+
+    ESCALATE = "escalate"
+    """A human should decide. Also the answer whenever the reviewer is unsure."""
+
+
+class ActionReview(BaseModel):
+    """An independent second opinion on one proposed action."""
+
+    verdict: ReviewVerdict = ReviewVerdict.ESCALATE
+    reason: str = ""
+    reviewer: str = "unknown"
+    """Who reviewed, e.g. ``rules`` or ``claude:claude-opus-5``."""
+
+
 class TimelineEvent(BaseModel):
     """One thing that happened to an incident."""
 
@@ -105,6 +124,13 @@ class ActionRecord(BaseModel):
     result: str = ""
     actor: str = ""
     at: datetime = Field(default_factory=utcnow)
+    review: ActionReview | None = None
+    """The reviewer's opinion, when a reviewer is configured. Advisory for an
+    action a hard rule already sent to a human; decisive for the rest."""
+
+    hard_rules: list[str] = Field(default_factory=list)
+    """Deterministic rules that require a human for this action, whatever the
+    reviewer said."""
 
 
 class Diagnosis(BaseModel):

@@ -20,7 +20,7 @@ from rich.table import Table
 
 from sentinel import __version__
 from sentinel.agent.base import build_engine
-from sentinel.config import AgentProvider, Settings, get_settings
+from sentinel.config import AgentProvider, ReviewerProvider, Settings, get_settings
 from sentinel.elt.warehouse import Warehouse, open_warehouse
 from sentinel.generator.source import generate_day, generate_range
 from sentinel.incidents.models import ActionStatus, Incident
@@ -28,6 +28,7 @@ from sentinel.incidents.store import IncidentStore
 from sentinel.logging import configure_logging
 from sentinel.monitor import MonitorResult, monitor
 from sentinel.remediation.executor import RemediationExecutor
+from sentinel.review.base import build_reviewer
 from sentinel.runner import refresh_run
 from sentinel.scenario import DEFAULT_SCENARIO, Scenario
 
@@ -128,17 +129,19 @@ def demo(
     """Run the full scenario end to end: history, faults, detection, repair."""
     settings = get_settings()
     if rules_only:
-        settings.agent.provider = AgentProvider.RULES
+        _force_rules(settings)
     if fresh:
         _reset(settings)
 
     scenario = DEFAULT_SCENARIO
     engine = build_engine(settings)
+    reviewer = build_reviewer(settings)
     console.print(
         Panel.fit(
             f"[bold]Sentinel {__version__}[/bold]\n"
             f"diagnosis engine: [cyan]{engine.name}[/cyan] "
             f"({settings.agent.model if engine.name == 'claude' else 'offline decision tree'})\n"
+            f"action reviewer: [cyan]{reviewer.name if reviewer else 'off'}[/cyan]\n"
             f"remediation mode: [cyan]{settings.remediation.mode}[/cyan]\n"
             f"warehouse: {settings.warehouse_path}",
             title="self-healing data platform",
@@ -157,6 +160,13 @@ def demo(
                 _auto_approve(warehouse, settings, result)
 
         _render_summary(warehouse, scenario)
+
+
+def _force_rules(settings: Settings) -> None:
+    """Keep both the diagnosis engine and the reviewer offline and deterministic."""
+    settings.agent.provider = AgentProvider.RULES
+    if settings.reviewer.provider is not ReviewerProvider.OFF:
+        settings.reviewer.provider = ReviewerProvider.RULES
 
 
 def _seed_history(warehouse: Warehouse, settings: Settings, scenario: Scenario) -> None:
@@ -223,6 +233,11 @@ def _render_incident(incident: Incident, compact: bool = False) -> None:
             ActionStatus.FAILED: "[red]![/red]",
         }.get(action.status, "|")
         console.print(f"      {marker} [{index}] {action.name} - {action.result}")
+        if not compact and action.review is not None:
+            console.print(
+                f"          [dim]review by {action.review.reviewer}: "
+                f"{action.review.verdict} - {action.review.reason}[/dim]"
+            )
 
 
 def _auto_approve(warehouse: Warehouse, settings: Settings, result: MonitorResult) -> None:
@@ -522,7 +537,7 @@ def eval_command(
         )
     settings = get_settings()
     if rules_only:
-        settings.agent.provider = AgentProvider.RULES
+        _force_rules(settings)
     if repeat > 1 and keep:
         raise typer.BadParameter("--keep cannot be combined with --repeat", param_hint="--keep")
 
@@ -543,6 +558,32 @@ def eval_command(
         console.print(
             f"[red]FAIL[/red] root-cause accuracy {worst:.0%} "
             f"is below the required {min_accuracy:.0%}"
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command("eval-review")
+def eval_review_command(
+    rules_only: Annotated[bool, typer.Option(help="Score the deterministic reviewer.")] = False,
+    keep: Annotated[bool, typer.Option(help="Reuse an existing warehouse.")] = False,
+) -> None:
+    """Score the action gate: does a harmful proposal ever get to run unattended?"""
+    from sentinel.evals.review import render_review_report, run_review_evals
+
+    settings = get_settings()
+    if rules_only:
+        _force_rules(settings)
+    if settings.reviewer.provider is ReviewerProvider.OFF:
+        raise typer.BadParameter(
+            "the reviewer is off (SENTINEL_REVIEWER__PROVIDER=off); there is nothing to score"
+        )
+
+    report = run_review_evals(settings, fresh=not keep)
+    render_review_report(report, console)
+    if report.harmful_approved:
+        console.print(
+            f"[red]FAIL[/red] {report.harmful_approved} harmful action(s) were cleared to run "
+            "without a human"
         )
         raise typer.Exit(code=1)
 

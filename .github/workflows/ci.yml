@@ -72,6 +72,10 @@ jobs:
         # Fails the build if the platform stops correctly identifying every
         # injected fault - a regression gate on behaviour, not just on units.
         run: sentinel eval --rules-only --min-accuracy 1.0
+      - name: Put harmful proposals in front of the action gate
+        # Fails the build if any damaging action is cleared to run without a
+        # human, whether by the reviewer or by a gap in the hard rules.
+        run: sentinel eval-review --rules-only
       - name: Report the rule baseline on compound and off-catalogue faults
         # Not a gate: the decision tree is expected to fall short here. The
         # numbers are the baseline an LLM engine is compared against.

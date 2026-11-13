@@ -4,7 +4,11 @@ The executor is where autonomy is actually bounded:
 
 * only names in :data:`sentinel.remediation.actions.ACTIONS` can run;
 * arguments are validated before anything touches the warehouse;
-* ``RiskLevel.HIGH`` actions never auto-execute, whatever the settings say;
+* hard rules send an action to a human whatever anyone says: ``RiskLevel.HIGH``,
+  or a target outside the incident's dataset and date
+  (:mod:`sentinel.remediation.policy`);
+* a reviewer gives every other action an independent second opinion, and only
+  what it approves runs unattended - no verdict, for any reason, means a human;
 * after applying changes it re-runs the pipeline and re-checks the data, so an
   incident is only closed when the evidence says it is fixed.
 """
@@ -18,14 +22,18 @@ from sentinel.config import RemediationMode, Settings, get_settings
 from sentinel.elt.warehouse import Warehouse
 from sentinel.incidents.models import (
     ActionRecord,
+    ActionReview,
     ActionStatus,
     Incident,
     IncidentStatus,
-    RiskLevel,
+    ProposedAction,
+    ReviewVerdict,
 )
 from sentinel.logging import get_logger
 from sentinel.quality.metrics import ROW_COUNT
 from sentinel.remediation.actions import ACTIONS, ActionContext
+from sentinel.remediation.policy import hard_rules
+from sentinel.review.base import ActionUnderReview, Reviewer, ReviewRequest, build_reviewer
 from sentinel.runner import refresh_run
 
 log = get_logger(__name__)
@@ -51,10 +59,21 @@ class RemediationExecutor:
         warehouse: Warehouse,
         settings: Settings | None = None,
         actor: str = "sentinel-agent",
+        reviewer: Reviewer | None = None,
     ) -> None:
         self.warehouse = warehouse
         self.settings = settings or get_settings()
         self.actor = actor
+        self._reviewer = reviewer
+        self._reviewer_built = reviewer is not None
+
+    @property
+    def reviewer(self) -> Reviewer | None:
+        """The configured reviewer, built on first use; ``None`` when reviewing is off."""
+        if not self._reviewer_built:
+            self._reviewer = build_reviewer(self.settings)
+            self._reviewer_built = True
+        return self._reviewer
 
     # -- public API --------------------------------------------------------
 
@@ -72,9 +91,33 @@ class RemediationExecutor:
                 f"{len(incident.diagnosis.proposed_actions)} proposed, {limit} allowed",
             )
 
-        records = [self._apply_one(incident, index) for index in range(len(proposals))]
+        records = self.plan(incident, proposals)
+        for record in records:
+            if record.status is ActionStatus.PROPOSED:
+                self._execute(incident, record)
         incident.actions.extend(records)
         return self._finalise(incident, records)
+
+    def plan(self, incident: Incident, proposals: list[ProposedAction]) -> list[ActionRecord]:
+        """Decide what may run unattended, without running anything.
+
+        Each returned record is ``FAILED`` (not on the whitelist, or bad
+        arguments), ``AWAITING_APPROVAL`` (a human must decide; ``result`` says
+        why) or still ``PROPOSED`` (cleared to execute).
+        """
+        records = [self._validate(incident, proposal) for proposal in proposals]
+        candidates = [record for record in records if record.status is ActionStatus.PROPOSED]
+        self._review(incident, candidates)
+
+        for record in candidates:
+            record.hard_rules = hard_rules(ACTIONS[record.name], record.arguments, incident)
+            reason = self._needs_human(record)
+            if reason is None:
+                continue
+            record.status = ActionStatus.AWAITING_APPROVAL
+            record.result = reason
+            incident.log_event(self.actor, "action.awaiting_approval", f"{record.name}: {reason}")
+        return records
 
     def approve(self, incident: Incident, action_index: int, approver: str) -> RemediationOutcome:
         """Execute an action a human has approved."""
@@ -118,9 +161,8 @@ class RemediationExecutor:
             actor=self.actor,
         )
 
-    def _apply_one(self, incident: Incident, index: int) -> ActionRecord:
-        assert incident.diagnosis is not None
-        proposal = incident.diagnosis.proposed_actions[index]
+    def _validate(self, incident: Incident, proposal: ProposedAction) -> ActionRecord:
+        """Check a proposal against the whitelist and its argument schema."""
         definition = ACTIONS.get(proposal.name)
 
         if definition is None:
@@ -148,16 +190,68 @@ class RemediationExecutor:
             record.status = ActionStatus.FAILED
             record.result = str(error)
             incident.log_event(self.actor, "action.invalid", f"{definition.name}: {error}")
-            return record
+        return record
 
-        if not self._may_auto_execute(definition.risk):
-            record.status = ActionStatus.AWAITING_APPROVAL
-            record.result = f"risk={definition.risk} requires human approval"
-            incident.log_event(
-                self.actor, "action.awaiting_approval", f"{definition.name}: {record.result}"
+    def _review(self, incident: Incident, records: list[ActionRecord]) -> None:
+        """Attach the reviewer's opinion to each record, failing closed.
+
+        The reviewer sees the incident and the bare actions. Whatever goes wrong -
+        an exception, a short answer - leaves the affected actions escalated: the
+        absence of an approval is never treated as one.
+        """
+        reviewer = self.reviewer
+        if reviewer is None or not records:
+            return
+
+        request = ReviewRequest(
+            incident=incident,
+            actions=[
+                ActionUnderReview.from_proposal(record.name, record.arguments) for record in records
+            ],
+            warehouse=self.warehouse,
+            settings=self.settings,
+        )
+        try:
+            reviews = reviewer.review(request)
+        except Exception as error:
+            detail = f"{type(error).__name__}: {error}"
+            log.warning("review.failed", incident_id=incident.incident_id, error=detail)
+            incident.log_event(reviewer.name, "review.failed", detail)
+            reviews = []
+
+        for index, record in enumerate(records):
+            record.review = (
+                reviews[index]
+                if index < len(reviews)
+                else ActionReview(
+                    verdict=ReviewVerdict.ESCALATE,
+                    reason="the reviewer failed to return a verdict",
+                    reviewer=reviewer.name,
+                )
             )
-            return record
+            incident.log_event(
+                record.review.reviewer,
+                "action.reviewed",
+                f"{record.name}: {record.review.verdict} - {record.review.reason}",
+            )
 
+    def _needs_human(self, record: ActionRecord) -> str | None:
+        """Why this action must wait for a human, or ``None`` when it may run.
+
+        Checked in order of authority: the hard rules, then the configured mode,
+        then the reviewer. A reviewer's approval is the last gate, never a way
+        around the first two.
+        """
+        if record.hard_rules:
+            return f"{'; '.join(record.hard_rules)} requires human approval"
+        if self.settings.remediation.mode is not RemediationMode.AUTO:
+            return f"risk={record.risk} requires human approval"
+        if record.review is not None and record.review.verdict is not ReviewVerdict.APPROVE:
+            return f"reviewer escalated: {record.review.reason}"
+        return None
+
+    def _execute(self, incident: Incident, record: ActionRecord) -> None:
+        definition = ACTIONS[record.name]
         try:
             record.result = definition.handler(self._context(incident), record.arguments)
             record.status = ActionStatus.EXECUTED
@@ -166,13 +260,6 @@ class RemediationExecutor:
             record.status = ActionStatus.FAILED
             record.result = f"{type(error).__name__}: {error}"
             incident.log_event(self.actor, "action.failed", f"{definition.name}: {record.result}")
-        return record
-
-    def _may_auto_execute(self, risk: RiskLevel) -> bool:
-        """High-risk actions always need a human, regardless of the configured mode."""
-        if risk is RiskLevel.HIGH:
-            return False
-        return self.settings.remediation.mode is RemediationMode.AUTO
 
     def _finalise(self, incident: Incident, records: list[ActionRecord]) -> RemediationOutcome:
         executed = [r for r in records if r.status is ActionStatus.EXECUTED]
