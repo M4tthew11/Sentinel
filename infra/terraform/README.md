@@ -34,7 +34,10 @@ terraform apply
   leak.
 - **The pipeline is a job, not a service.** It runs once per business date and
   exits; a long-lived container would keep a warehouse connection open for
-  nothing.
+  nothing. The job passes no date: `sentinel monitor` resolves it at run time to
+  yesterday in `business_timezone`. To reprocess a specific day, start the job
+  with `--args monitor 2026-11-10` or set `SENTINEL_BUSINESS_DATE` on that
+  execution.
 - **`remediation_mode` defaults to `manual`.** Autonomy is opt-in per
   environment: nothing self-applies in a new deployment until someone has watched
   it propose the right thing a few times.

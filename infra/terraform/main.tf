@@ -367,13 +367,20 @@ resource "azurerm_container_app_job" "pipeline" {
       cpu    = 1.0
       memory = "2Gi"
 
-      # The date is resolved by the entrypoint at run time in a real
-      # deployment; kept explicit here so the contract is visible.
-      args = ["monitor", "$(BUSINESS_DATE)"]
+      # No date here on purpose: Container Apps cannot compute one in an
+      # argument list, and an unresolved $(VAR) reaches the process verbatim.
+      # `sentinel monitor` without a date processes yesterday in the business
+      # timezone. To backfill, start the job with an explicit date:
+      #   az containerapp job start ... --args monitor 2026-11-10
+      args = ["monitor"]
 
       env {
         name  = "SENTINEL_DATA_DIR"
         value = "/data"
+      }
+      env {
+        name  = "SENTINEL_BUSINESS_TIMEZONE"
+        value = var.business_timezone
       }
       env {
         name  = "SENTINEL_LOG_FORMAT"

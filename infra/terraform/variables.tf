@@ -65,6 +65,15 @@ variable "pipeline_cron" {
   default     = "0 3 * * *"
 }
 
+variable "business_timezone" {
+  description = <<-EOT
+    IANA timezone of the business day. The job processes "yesterday" in this
+    zone, so pipeline_cron (UTC) must fire after midnight there.
+  EOT
+  type        = string
+  default     = "UTC"
+}
+
 variable "anthropic_secret_name" {
   description = "Name of the Key Vault secret holding the Anthropic API key. Empty disables it."
   type        = string

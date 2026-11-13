@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "console"
 
+    business_date: str | None = None
+    """Date (YYYY-MM-DD) for ``run``/``monitor`` when none is given as an argument."""
+
+    business_timezone: str = "UTC"
+    """IANA timezone in which "yesterday" is worked out for a scheduled run."""
+
     agent: AgentSettings = Field(default_factory=AgentSettings)
     remediation: RemediationSettings = Field(default_factory=RemediationSettings)
     detection: DetectionSettings = Field(default_factory=DetectionSettings)
