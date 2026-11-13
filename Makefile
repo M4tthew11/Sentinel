@@ -4,7 +4,7 @@
 .DEFAULT_GOAL := help
 PYTHON ?= python
 
-.PHONY: help install demo eval test lint format typecheck check serve docker clean
+.PHONY: help install demo eval eval-review test lint format typecheck check serve docker clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -19,6 +19,9 @@ demo: ## Run the full self-healing demo (offline, no API key needed)
 
 eval: ## Score the diagnosis engine against the golden incident set
 	sentinel eval --rules-only
+
+eval-review: ## Check that no harmful action gets past the reviewer and the hard rules
+	sentinel eval-review --rules-only
 
 test: ## Run the test suite with coverage
 	pytest --cov=sentinel --cov-report=term-missing

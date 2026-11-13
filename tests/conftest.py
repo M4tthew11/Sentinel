@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from sentinel.config import AgentProvider, RemediationMode, Settings
+from sentinel.config import AgentProvider, RemediationMode, ReviewerProvider, Settings
 from sentinel.elt.warehouse import Warehouse
 from sentinel.generator.faults import FaultSpec
 from sentinel.generator.source import generate_day, generate_range
@@ -29,9 +29,14 @@ HISTORY_DAYS = 14
 
 
 def _build_settings(data_dir: Path) -> Settings:
-    """Settings with the agent forced offline and a short detector warm-up."""
+    """Settings with the agent forced offline and a short detector warm-up.
+
+    The reviewer is off by default so the tests of the whitelist and the risk
+    gate exercise those alone; the reviewer has its own tests, which turn it on.
+    """
     settings = Settings(data_dir=data_dir)
     settings.agent.provider = AgentProvider.RULES
+    settings.reviewer.provider = ReviewerProvider.OFF
     settings.remediation.mode = RemediationMode.AUTO
     settings.detection.min_history_runs = 5
     settings.ensure_dirs()

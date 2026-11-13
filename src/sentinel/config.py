@@ -37,7 +37,24 @@ class RemediationMode(StrEnum):
     """Every action is proposed only; a human approves it via the API or CLI."""
 
     AUTO = "auto"
-    """Low-risk actions execute immediately; risky ones still require approval."""
+    """Low-risk actions the reviewer approves execute immediately; risky or
+    doubted ones still require approval."""
+
+
+class ReviewerProvider(StrEnum):
+    """Which reviewer gives a second opinion on proposed actions."""
+
+    OFF = "off"
+    """No reviewer: only the risk level decides what runs without a human."""
+
+    AUTO = "auto"
+    """Use Claude when an API key is present, otherwise the rule reviewer."""
+
+    CLAUDE = "claude"
+    """Force the Claude reviewer; fails loudly if no API key is set."""
+
+    RULES = "rules"
+    """Force the deterministic rule reviewer (used in CI and offline demos)."""
 
 
 class AgentSettings(BaseModel):
@@ -63,6 +80,25 @@ class AgentSettings(BaseModel):
         Deliberately not a settings field: the key should never end up in a
         serialised settings object, a log line or an incident document.
         """
+        return os.environ.get("ANTHROPIC_API_KEY") or None
+
+
+class ReviewerSettings(BaseModel):
+    """Configuration for the action reviewer.
+
+    Separate from :class:`AgentSettings` on purpose: the reviewer can run on a
+    different model from the agent whose proposals it checks.
+    """
+
+    provider: ReviewerProvider = ReviewerProvider.AUTO
+    model: str = "claude-opus-5"
+    effort: str = "medium"
+    max_tool_calls: int = Field(default=6, ge=1, le=32)
+    max_tokens: int = Field(default=8192, ge=1024, le=32000)
+
+    @property
+    def api_key(self) -> str | None:
+        """Read the Anthropic key from the environment at call time."""
         return os.environ.get("ANTHROPIC_API_KEY") or None
 
 
@@ -108,6 +144,7 @@ class Settings(BaseSettings):
     """IANA timezone in which "yesterday" is worked out for a scheduled run."""
 
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    reviewer: ReviewerSettings = Field(default_factory=ReviewerSettings)
     remediation: RemediationSettings = Field(default_factory=RemediationSettings)
     detection: DetectionSettings = Field(default_factory=DetectionSettings)
 

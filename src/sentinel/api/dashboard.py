@@ -314,6 +314,18 @@ async function drawChart(incident, metric) {
   }
 }
 
+function reviewLine(action) {
+  const review = action.review;
+  if (!review) return "";
+  const approved = review.verdict === "approve";
+  const rules = (action.hard_rules || []).length;
+  const note = approved && rules ? " (advisory: a hard rule still requires a human)" : "";
+  return `<div class="result" style="margin-top:4px">
+      ${pill(approved ? "reviewer: approve" : "reviewer: escalate", approved ? "ok" : "warning")}
+      <span class="muted">${esc(review.reviewer)}</span> ${esc(review.reason)}${note}
+    </div>`;
+}
+
 function actionRow(incident, action, index) {
   const pending = action.status === "awaiting_approval";
   const buttons = `<button class="quiet" onclick="togglePreview('${esc(incident.incident_id)}', ${index})">What changes?</button>`
@@ -329,6 +341,7 @@ function actionRow(incident, action, index) {
       </div>
       ${args ? `<div class="mono muted" style="margin-top:4px">${args}</div>` : ""}
       <div class="result" style="margin-top:4px">${esc(action.result || action.rationale || "")}</div>
+      ${reviewLine(action)}
       <div id="preview-${index}"></div>
     </div>`;
 }
