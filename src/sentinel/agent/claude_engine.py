@@ -77,7 +77,7 @@ class ClaudeEngine:
 
     def _run_loop(self, request: DiagnosisRequest) -> Diagnosis | None:
         incident = request.incident
-        toolbox = Toolbox(request.warehouse, incident.business_date)
+        toolbox = Toolbox(request.warehouse, incident.business_date, incident=incident)
         tools: list[dict[str, Any]] = [*TOOL_SCHEMAS, SUBMIT_TOOL]
         messages: list[dict[str, Any]] = [{"role": "user", "content": incident_brief(incident)}]
 
@@ -105,7 +105,7 @@ class ClaudeEngine:
 
             submissions = [block for block in tool_uses if block.name == "submit_diagnosis"]
             if submissions:
-                return self._parse_diagnosis(submissions[0].input, len(toolbox.call_log))
+                return self._parse_diagnosis(submissions[0].input, toolbox.call_log)
 
             results = [
                 {
@@ -124,7 +124,7 @@ class ClaudeEngine:
         )
         return None
 
-    def _parse_diagnosis(self, payload: dict[str, Any], tool_calls: int) -> Diagnosis:
+    def _parse_diagnosis(self, payload: dict[str, Any], tools_used: list[str]) -> Diagnosis:
         """Convert the model's ``submit_diagnosis`` arguments into a Diagnosis."""
         try:
             root_cause = RootCause(str(payload.get("root_cause", "unknown")))
@@ -162,7 +162,8 @@ class ClaudeEngine:
             reasoning=str(payload.get("reasoning") or ""),
             proposed_actions=actions,
             engine=f"claude:{self.settings.model}",
-            tool_calls=tool_calls,
+            tool_calls=len(tools_used),
+            tools_used=list(tools_used),
         )
 
     def _degrade(self, request: DiagnosisRequest, reason: str) -> Diagnosis:

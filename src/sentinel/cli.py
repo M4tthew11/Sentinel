@@ -490,8 +490,9 @@ def eval_command(
     scenario: Annotated[
         str,
         typer.Option(
-            help="Which scenario to replay: 'standard' (one catalogued fault per day) or "
-            "'hard' (compound and off-catalogue faults)."
+            help="Which scenario to replay: 'standard' (one catalogued fault per day), "
+            "'hard' (compound and off-catalogue faults) or 'recurring' (faults that come "
+            "back, so the agent has incident history to draw on)."
         ),
     ] = "standard",
     repeat: Annotated[

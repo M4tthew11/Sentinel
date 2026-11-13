@@ -29,6 +29,7 @@ from sentinel.scenario import (
     SCENARIOS,
     ScenarioDay,
     build_hard_scenario,
+    build_recurring_scenario,
     build_scenario,
 )
 
@@ -246,7 +247,7 @@ def test_hard_scenario_mixes_compound_and_off_catalogue_days() -> None:
     assert {spec.fault_type for spec in injected} & OFF_CATALOGUE == OFF_CATALOGUE
     assert any(day.forbidden_actions for day in scenario.days)
     assert not scenario.days[-1].is_incident, "a clean control day keeps false positives honest"
-    assert set(SCENARIOS) == {"standard", "hard"}
+    assert {"standard", "hard"} <= set(SCENARIOS)
 
 
 # -- repeated runs -----------------------------------------------------------
@@ -292,3 +293,56 @@ def test_single_run_payload_says_one_run(tmp_path) -> None:
 def test_repeat_must_be_positive() -> None:
     with pytest.raises(ValueError):
         run_repeated_evals(repeat=0)
+
+
+# -- incident history ---------------------------------------------------------
+
+
+def test_score_records_whether_history_was_consulted() -> None:
+    day = DEFAULT_SCENARIO.incident_days[0]
+
+    def scored(tools_used: list[str]) -> EvalCase:
+        incident = Incident(
+            run_id="RUN-1",
+            business_date=day.business_date,
+            dataset=day.dataset or "pos_sales",
+            diagnosis=Diagnosis(root_cause=RootCause.VOLUME_DROP, tools_used=tools_used),
+        )
+        return _score(day, [incident])
+
+    assert scored(["find_similar_incidents", "count_rows_by"]).consulted_history
+    assert not scored(["count_rows_by"]).consulted_history
+
+    report = EvalReport(engine="stub", cases=[scored(["find_similar_incidents"]), scored([])])
+    assert report.history_use_rate == pytest.approx(0.5)
+
+
+def test_recurring_scenario_repeats_faults_and_sets_a_lookalike_trap() -> None:
+    scenario = build_recurring_scenario()
+    assert SCENARIOS["recurring"]().name == "recurring"
+
+    def shape(day: ScenarioDay) -> tuple[str, tuple[str, ...]]:
+        return (
+            day.dataset or "-",
+            tuple(
+                sorted(
+                    str(spec.fault_type)
+                    for value in day.faults.values()
+                    for spec in fault_specs(value)
+                )
+            ),
+        )
+
+    shapes = [shape(day) for day in scenario.incident_days]
+    repeats = {item for item in shapes if shapes.count(item) == 2}
+    assert len(repeats) == 2, "two faults must occur twice, so the second has a precedent"
+
+    partial, full = (
+        day
+        for day in scenario.incident_days
+        if day.expected_root_cause is RootCause.UNIT_OF_MEASURE
+    )
+    assert partial.business_date < full.business_date
+    assert "apply_unit_correction" in partial.forbidden_actions
+    assert full.expected_actions == ("apply_unit_correction",)
+    assert not scenario.days[-1].is_incident

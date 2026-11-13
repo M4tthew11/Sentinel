@@ -22,7 +22,7 @@ two implementations:
 - **`RuleBasedEngine`** - an explicit decision tree over the same evidence. It is
   not a stub: it runs the demo, runs in CI, and is the baseline the LLM is scored
   against.
-- **`ClaudeEngine`** - a tool-use loop with five read-only investigation tools and
+- **`ClaudeEngine`** - a tool-use loop with six read-only investigation tools and
   a terminal `submit_diagnosis` tool that carries the structured verdict.
 
 Selection is by configuration with a sensible default (`auto`): use Claude when
