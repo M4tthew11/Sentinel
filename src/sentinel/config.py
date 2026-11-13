@@ -122,6 +122,17 @@ class DetectionSettings(BaseModel):
     """Expected share of anomalous runs, passed to IsolationForest."""
 
 
+class ImpactSettings(BaseModel):
+    """Configuration for blast-radius and loss estimation."""
+
+    enabled: bool = True
+    """Whether each new incident gets an impact assessment."""
+
+    config_path: Path | None = None
+    """Lineage and cost model file (YAML). Defaults to the one shipped with the
+    package, which describes the demo warehouse."""
+
+
 class Settings(BaseSettings):
     """Top-level settings object."""
 
@@ -147,6 +158,7 @@ class Settings(BaseSettings):
     reviewer: ReviewerSettings = Field(default_factory=ReviewerSettings)
     remediation: RemediationSettings = Field(default_factory=RemediationSettings)
     detection: DetectionSettings = Field(default_factory=DetectionSettings)
+    impact: ImpactSettings = Field(default_factory=ImpactSettings)
 
     @property
     def landing_dir(self) -> Path:

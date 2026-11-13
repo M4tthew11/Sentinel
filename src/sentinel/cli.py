@@ -23,7 +23,8 @@ from sentinel.agent.base import build_engine
 from sentinel.config import AgentProvider, ReviewerProvider, Settings, get_settings
 from sentinel.elt.warehouse import Warehouse, open_warehouse
 from sentinel.generator.source import generate_day, generate_range
-from sentinel.incidents.models import ActionStatus, Incident
+from sentinel.impact import ImpactConfigError, format_money, headline, load_lineage
+from sentinel.incidents.models import ActionStatus, ImpactAssessment, Incident
 from sentinel.incidents.store import IncidentStore
 from sentinel.logging import configure_logging
 from sentinel.monitor import MonitorResult, monitor
@@ -214,6 +215,11 @@ def _render_incident(incident: Incident, compact: bool = False) -> None:
     )
     console.print(f"      {incident.title}")
 
+    if incident.impact is not None:
+        console.print(f"      [cyan]impact[/cyan] {headline(incident.impact)}")
+        if not compact:
+            _render_impact(incident.impact)
+
     if incident.diagnosis:
         diagnosis = incident.diagnosis
         console.print(
@@ -238,6 +244,45 @@ def _render_incident(incident: Incident, compact: bool = False) -> None:
                 f"          [dim]review by {action.review.reviewer}: "
                 f"{action.review.verdict} - {action.review.reason}[/dim]"
             )
+
+
+def _render_impact(impact: ImpactAssessment) -> None:
+    """Print the blast radius and how the loss estimate is built."""
+    cost = impact.cost
+    consumers = Table(title=f"takes data from {impact.dataset}", header_style="bold")
+    for column in ("consumer", "kind", "owner", "criticality", "path", "assumed rate"):
+        consumers.add_column(column)
+    for asset in impact.consumers:
+        consumers.add_row(
+            asset.name,
+            asset.kind,
+            asset.owner or "-",
+            asset.criticality,
+            " > ".join(asset.via),
+            f"{format_money(asset.cost_per_hour, cost.currency)}/h",
+        )
+    if impact.consumers:
+        console.print(consumers)
+    else:
+        console.print("      [dim]no downstream consumers are declared for this dataset[/dim]")
+
+    estimate = Table(
+        title="estimated loss (an estimate from configured rates, not a measurement)",
+        header_style="bold",
+    )
+    for column in ("term", "arithmetic", "amount"):
+        estimate.add_column(column)
+    for line in cost.components:
+        estimate.add_row(line.label, line.basis, format_money(line.amount, cost.currency))
+    estimate.add_row(
+        "[bold]total[/bold]",
+        f"range {format_money(cost.low, cost.currency)}-{format_money(cost.high, cost.currency)}",
+        f"[bold]~{format_money(cost.amount, cost.currency)}[/bold]",
+    )
+    console.print(estimate)
+    for assumption in cost.assumptions:
+        console.print(f"      [dim]- {assumption}[/dim]")
+    console.print(f"      [dim]lineage and rates: {impact.source}[/dim]\n")
 
 
 def _auto_approve(warehouse: Warehouse, settings: Settings, result: MonitorResult) -> None:
@@ -267,6 +312,8 @@ def _render_summary(warehouse: Warehouse, scenario: Scenario) -> None:
     table = Table(title="incident summary", header_style="bold")
     for column in ("incident", "date", "dataset", "root cause", "expected", "status"):
         table.add_column(column)
+    table.add_column("priority")
+    table.add_column("est. loss", justify="right")
 
     expected_by_date = {
         day.business_date: day.expected_root_cause for day in scenario.incident_days
@@ -283,8 +330,18 @@ def _render_summary(warehouse: Warehouse, scenario: Scenario) -> None:
             f"[{match}]{diagnosed}[/{match}]",
             expected_text,
             f"[{STATUS_STYLE.get(str(incident.status), 'white')}]{incident.status}[/]",
+            incident.impact.priority if incident.impact else "-",
+            f"~{format_money(incident.impact.cost.amount, incident.impact.cost.currency)}"
+            if incident.impact
+            else "-",
         )
     console.print(table)
+    if any(incident.impact for incident in incidents):
+        console.print(
+            "[dim]est. loss is what each incident put at stake under the cost model's "
+            "assumptions - an estimate, not a measured loss. "
+            "'sentinel show <incident>' lists the consumers and the arithmetic.[/dim]"
+        )
 
     held = warehouse.fetch_df(
         "SELECT business_date, dataset, reason FROM ops_hold WHERE released_at IS NULL"
@@ -385,7 +442,7 @@ def incidents(
 
 @app.command()
 def show(incident_id: Annotated[str, typer.Argument(help="Incident id.")]) -> None:
-    """Show one incident in full, including the agent's reasoning."""
+    """The incident report: impact, diagnosis and reasoning, actions, timeline."""
     settings = get_settings()
     with open_warehouse(settings, read_only=True, init=False) as warehouse:
         incident = IncidentStore(warehouse).get(incident_id)
@@ -397,6 +454,55 @@ def show(incident_id: Annotated[str, typer.Argument(help="Incident id.")]) -> No
     console.print("\n[bold]timeline[/bold]")
     for event in incident.timeline:
         console.print(f"  {event.at:%H:%M:%S}  {event.actor:<20} {event.event}: {event.detail}")
+
+
+@app.command("impact")
+def impact_command(
+    dataset: Annotated[
+        str | None, typer.Argument(help="Source dataset; all of them when omitted.")
+    ] = None,
+    check: Annotated[
+        bool, typer.Option("--check", help="Only validate the lineage file and exit.")
+    ] = False,
+) -> None:
+    """Show what is downstream of a dataset, from the lineage file in use."""
+    settings = get_settings()
+    try:
+        graph = load_lineage(settings.impact.config_path)
+    except ImpactConfigError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(code=1) from error
+
+    config = graph.config
+    if check:
+        console.print(
+            f"[green]OK[/green] {graph.source}: {len(config.sources)} source(s), "
+            f"{len(config.assets)} downstream asset(s)"
+        )
+        return
+    if dataset is not None and not graph.knows(dataset):
+        console.print(
+            f"[red]No source dataset {dataset}.[/red] Declared: {', '.join(config.sources)}"
+        )
+        raise typer.Exit(code=1)
+
+    currency = graph.cost_model.currency
+    for source in [dataset] if dataset else config.sources:
+        table = Table(title=f"downstream of {source}", header_style="bold")
+        for column in ("asset", "kind", "owner", "criticality", "hops", "path", "assumed rate"):
+            table.add_column(column)
+        for asset in graph.downstream(source):
+            table.add_row(
+                asset.name,
+                asset.kind,
+                asset.owner or "-",
+                asset.criticality if asset.kind != "table" else "-",
+                str(asset.distance),
+                " > ".join(asset.via),
+                f"{format_money(asset.cost_per_hour, currency)}/h" if asset.cost_per_hour else "-",
+            )
+        console.print(table)
+    console.print(f"[dim]lineage and rates: {graph.source}[/dim]")
 
 
 @app.command()

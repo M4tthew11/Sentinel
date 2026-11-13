@@ -21,7 +21,8 @@ from sentinel.config import Settings, get_settings
 from sentinel.elt import ops
 from sentinel.elt.warehouse import Warehouse
 from sentinel.evals.reports import EVAL_REPORT_DIR, load_reports
-from sentinel.incidents.models import Incident, IncidentStatus
+from sentinel.impact import ImpactConfigError, load_lineage
+from sentinel.incidents.models import ImpactAssessment, Incident, IncidentStatus
 from sentinel.incidents.store import IncidentStore
 from sentinel.logging import get_logger
 from sentinel.remediation.actions import ACTIONS
@@ -84,10 +85,18 @@ def summary() -> dict[str, Any]:
             LIMIT 1
             """
         )
+        open_incidents = store.open_incidents()
+        at_stake = [item.impact.cost for item in open_incidents if item.impact is not None]
         return {
             "incidents_total": len(incidents),
             "incidents_by_status": by_status,
-            "open_incidents": len(store.open_incidents()),
+            "open_incidents": len(open_incidents),
+            "open_estimated_loss": {
+                "amount": sum(cost.amount for cost in at_stake),
+                "currency": at_stake[0].currency if at_stake else None,
+                "incidents": len(at_stake),
+                "is_estimate": True,
+            },
             "active_holds": [
                 {
                     "hold_id": hold.hold_id,
@@ -274,6 +283,31 @@ def eval_reports() -> list[dict[str, Any]]:
     return load_reports(get_settings().data_dir / EVAL_REPORT_DIR)
 
 
+@app.get("/api/lineage", tags=["impact"])
+def lineage(
+    dataset: str | None = Query(default=None, description="Only what is downstream of this."),
+) -> dict[str, Any]:
+    """The declared lineage: sources, downstream assets and the cost model in use."""
+    try:
+        graph = load_lineage(get_settings().impact.config_path)
+    except ImpactConfigError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    sources = graph.config.sources
+    if dataset is not None:
+        if not graph.knows(dataset):
+            raise HTTPException(status_code=404, detail=f"No source dataset {dataset}")
+        sources = [dataset]
+    return {
+        "source": graph.source,
+        "sources": sources,
+        "downstream": {
+            name: [asset.model_dump(mode="json") for asset in graph.downstream(name)]
+            for name in sources
+        },
+        "cost_model": graph.cost_model.model_dump(mode="json"),
+    }
+
+
 @app.get("/api/actions", tags=["remediation"])
 def action_catalogue() -> list[dict[str, Any]]:
     """The remediation whitelist, as served to the agent."""
@@ -336,6 +370,7 @@ def _serialise(incident: Incident) -> dict[str, Any]:
         "confidence": diagnosis.confidence if diagnosis else None,
         "engine": diagnosis.engine if diagnosis else None,
         "summary": diagnosis.summary if diagnosis else "",
+        "impact": _impact_summary(incident.impact),
         "actions": [
             {
                 "index": index,
@@ -347,6 +382,24 @@ def _serialise(incident: Incident) -> dict[str, Any]:
             }
             for index, action in enumerate(incident.actions)
         ],
+    }
+
+
+def _impact_summary(impact: ImpactAssessment | None) -> dict[str, Any] | None:
+    """The headline of an impact assessment, for list views."""
+    if impact is None:
+        return None
+    return {
+        "priority": impact.priority,
+        "consumers": len(impact.consumers),
+        "decisions": impact.count("decision"),
+        "dashboards": impact.count("dashboard"),
+        "reports": impact.count("report"),
+        "estimated_loss": impact.cost.amount,
+        "estimated_loss_low": impact.cost.low,
+        "estimated_loss_high": impact.cost.high,
+        "currency": impact.cost.currency,
+        "is_estimate": True,
     }
 
 
